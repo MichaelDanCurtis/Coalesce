@@ -1,4 +1,4 @@
-# AgentPather
+# Coalesce
 
 Smart LLM routing proxy that scores requests across 15 dimensions and routes them to the cheapest capable provider -- prioritizing free and included credits before paid options.
 
@@ -34,8 +34,8 @@ Smart LLM routing proxy that scores requests across 15 dimensions and routes the
 
 ```bash
 # Clone and build
-git clone https://github.com/AgentPather/AgentPather.git
-cd AgentPather
+git clone https://github.com/MichaelDanCurtis/Coalesce.git
+cd Coalesce
 cargo build --release
 
 # Binary is at target/release/agentpather
@@ -74,11 +74,11 @@ curl http://127.0.0.1:8402/v1/chat/completions \
   }'
 ```
 
-The response includes routing metadata in the `x_agentpather` field:
+The response includes routing metadata in the `x_coalesce` field:
 
 ```json
 {
-  "x_agentpather": {
+  "x_coalesce": {
     "tier": "Simple",
     "score": 0.05,
     "provider": "ollama",
@@ -192,7 +192,7 @@ agentpather --config /path/to/config.toml serve
 
 ## Configuration
 
-AgentPather looks for configuration in this order:
+Coalesce looks for configuration in this order:
 1. Path passed via `--config`
 2. `./agentpather.toml`
 3. `./config.toml`
@@ -298,7 +298,7 @@ Built with Tailwind CSS and vanilla JavaScript. No build step required.
 
 ## Desktop App
 
-AgentPather includes a Tauri 2 desktop application (`desktop/src-tauri`) that wraps the proxy with:
+Coalesce includes a Tauri 2 desktop application (`desktop/src-tauri`) that wraps the proxy with:
 
 - **System tray** -- start/stop the proxy from the menu bar
 - **React dashboard** -- full-featured UI built with React
@@ -313,11 +313,19 @@ npm install
 npm run tauri build
 ```
 
-## API Reference
+## API Transports
 
-### HTTP API (port 8402)
+Coalesce exposes two parallel API transports that share the same routing engine, economics logic, and provider pool. Choose the one that fits your use case:
 
-#### OpenAI-Compatible
+### Axum REST API (port 8402) -- Human & Tool Friendly
+
+The REST API is an **OpenAI-compatible HTTP/JSON endpoint**. Any application that can talk to the OpenAI API can point at Coalesce instead -- just change the base URL to `http://localhost:8402`. This makes it a **drop-in replacement** for Claude Code, Cursor, Continue, Open Interpreter, or any OpenAI SDK client.
+
+The REST API also powers the dashboard UI and desktop app with additional endpoints for provider management, stats, and live event streaming.
+
+**Best for:** Developer tools, IDE integrations, the dashboard UI, and any client that already speaks OpenAI's API format.
+
+#### OpenAI-Compatible Endpoints
 
 | Method | Path                     | Description                          |
 |--------|--------------------------|--------------------------------------|
@@ -325,7 +333,7 @@ npm run tauri build
 | GET    | `/v1/models`             | List all available models with pricing |
 | GET    | `/v1/stats`              | Request statistics and quota states  |
 
-#### Dashboard REST API
+#### Dashboard & Management Endpoints
 
 | Method | Path                          | Description                        |
 |--------|-------------------------------|------------------------------------|
@@ -336,27 +344,45 @@ npm run tauri build
 | GET    | `/api/v1/routing/profiles`    | List routing profiles from config  |
 | GET    | `/api/v1/stats/summary`       | Aggregated stats                   |
 | GET    | `/api/v1/stats/timeline`      | Paginated request history (`?limit=50&offset=0`) |
+| GET    | `/api/events`                 | SSE stream of live routing decisions |
 
 #### Response Headers
 
-Streaming responses include routing metadata in headers:
+Streaming responses include routing metadata:
 
 | Header                   | Description                     |
 |--------------------------|---------------------------------|
-| `X-AgentPather-Model`    | Selected model ID               |
-| `X-AgentPather-Provider` | Provider name                   |
-| `X-AgentPather-Tier`     | Classified tier (Simple/Medium/Complex/Reasoning) |
-| `X-AgentPather-Attempt`  | Fallback attempt number (1-3)   |
+| `X-Coalesce-Model`       | Selected model ID               |
+| `X-Coalesce-Provider`    | Provider name                   |
+| `X-Coalesce-Tier`        | Classified tier (Simple/Medium/Complex/Reasoning) |
+| `X-Coalesce-Attempt`     | Fallback attempt number (1-3)   |
 
-### gRPC API (port 8403)
+### Tonic gRPC API (port 8403) -- Agent & Pipeline Friendly
 
-The gRPC service (`AgentPatherService`) runs on HTTP port + 1 and provides:
+The gRPC API provides the same routing capabilities over **Protocol Buffers** (binary-encoded messages) instead of JSON. It runs automatically on HTTP port + 1.
 
-- `ChatCompletion` -- route and complete a chat request
-- `ListModels` -- list available models
-- `Health` -- service health check
+**Why gRPC?** For high-frequency agent orchestration scenarios -- multi-agent systems dispatching hundreds of routing decisions per minute -- gRPC eliminates JSON serialization overhead and provides ~2-10x lower latency per call. The `.proto` schema also enables auto-generated, strongly-typed client SDKs in any language (Python, Go, TypeScript, Java, etc.).
 
-Proto definition: `crates/agentpather-proxy/proto/agentpather.proto`
+**Best for:** AI agent pipelines, multi-agent orchestrators, batch processing systems, and any scenario where routing throughput matters.
+
+| RPC Method       | Description                     |
+|------------------|---------------------------------|
+| `ChatCompletion` | Route and complete a chat request |
+| `ListModels`     | List available models           |
+| `Health`         | Service health check            |
+
+Proto definition: `proto/agentpather.proto`
+
+### Transport Comparison
+
+| | REST (Axum) | gRPC (Tonic) |
+|---|---|---|
+| **Port** | 8402 | 8403 |
+| **Format** | JSON over HTTP | Protobuf over HTTP/2 |
+| **Best for** | Human tools (Cursor, Claude Code, dashboard) | Agent-to-agent, high-frequency automation |
+| **Compatibility** | Drop-in OpenAI replacement | Needs generated client stubs |
+| **Streaming** | SSE (Server-Sent Events) | gRPC streaming |
+| **Overhead** | ~1-5ms JSON parse | ~0.1-0.5ms protobuf decode |
 
 ## Plugin System
 
@@ -386,7 +412,7 @@ The plugin architecture is WASM-ready. Native Rust plugins are loaded at startup
 
 ### Prompt Injection Detection
 
-AgentPather scans incoming messages for prompt injection patterns before routing. Configure sensitivity in `agentpather.toml`:
+Coalesce scans incoming messages for prompt injection patterns before routing. Configure sensitivity in `agentpather.toml`:
 
 ```toml
 [sanitize]
