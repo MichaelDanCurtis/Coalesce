@@ -164,12 +164,12 @@ export default function RoutingViz({ path }: { path: RoutingPath | null }) {
                 filter={node.active ? "url(#glow)" : undefined}
               />
 
-              {/* Accent bar left */}
+              {/* Accent bar left — inset to avoid clipping rounded corners */}
               <rect
-                x={x}
-                y={y}
+                x={x + 4}
+                y={y + 4}
                 width={3}
-                height={NODE_HEIGHT}
+                height={NODE_HEIGHT - 8}
                 rx={1.5}
                 fill={node.color}
                 opacity={node.active ? 0.8 : 0.3}
