@@ -535,7 +535,14 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([
+            "x-coalesce-model".parse().unwrap(),
+            "x-coalesce-provider".parse().unwrap(),
+            "x-coalesce-tier".parse().unwrap(),
+            "x-coalesce-attempt".parse().unwrap(),
+            "x-coalesce-session-id".parse().unwrap(),
+        ]);
 
     let mut app = Router::new()
         .route("/", get(dashboard))
