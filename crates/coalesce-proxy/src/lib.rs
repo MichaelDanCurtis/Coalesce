@@ -1,4 +1,6 @@
 pub mod grpc;
+pub mod harness;
+pub mod rules;
 
 use coalesce_core::cache::dedup::{DedupAction, DedupResult, RequestDedup};
 use coalesce_core::cache::semantic::SemanticCache;
@@ -15,7 +17,7 @@ use coalesce_core::providers::openai_compat::factories;
 use coalesce_core::providers::openrouter::OpenRouterProvider;
 use coalesce_core::providers::Provider;
 use coalesce_core::storage::{RequestLogEntry, Storage};
-use coalesce_core::types::{ChatRequest, Message, MessageContent, ModelInfo, QualityTier};
+use coalesce_core::types::{ChatRequest, ContentPart, Message, MessageContent, ModelInfo, QualityTier};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -35,7 +37,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+use base64::Engine as _;
 
 /// Maximum fallback attempts before giving up
 const MAX_FALLBACK_ATTEMPTS: usize = 3;
@@ -198,6 +201,12 @@ pub struct ProxyState {
     pub provider_priorities: DashMap<String, u32>,
     /// Provider pricing mode. Key = provider name, value = "subscription" or "metered".
     pub provider_pricing_modes: DashMap<String, String>,
+    /// Disabled providers — excluded from routing. Key = provider name.
+    pub disabled_providers: DashMap<String, bool>,
+    /// Disabled models — excluded from routing. Key = "provider::model_id".
+    pub disabled_models: DashMap<String, bool>,
+    /// Auto-failover rules engine
+    pub rules: rules::RulesEngine,
 }
 
 impl ProxyState {
@@ -225,23 +234,43 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
     info!("Database: {}", db_path.display());
 
     // Try to get a fresh Google token:
-    // 1. Read from Antigravity's DB (always fresh if app is installed)
+    // 1. Read from Antigravity's DB and validate it
     // 2. Fall back to refreshing our own stored refresh token
-    let google_token = read_antigravity_token()
-        .or_else(|| {
-            // Fall back to refresh token
-            if let Ok(Some(rt)) = storage.get("google_refresh_token") {
-                let rt_clone = rt.clone();
-                // Use a blocking approach since we're in async context
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        refresh_google_token(&rt_clone).await.ok()
-                    })
+    let antigravity_token = read_antigravity_token();
+    let google_token = if let Some(ref at) = antigravity_token {
+        // Validate the Antigravity token with a quick API call
+        let valid = validate_google_token(at).await;
+        if valid {
+            antigravity_token
+        } else {
+            info!("  google — Antigravity token expired, trying refresh token");
+            None
+        }
+    } else {
+        None
+    };
+    // Fall back to our own refresh token if Antigravity token was missing or expired
+    let google_token = google_token.or_else(|| {
+        if let Ok(Some(rt)) = storage.get("google_refresh_token") {
+            let rt_clone = rt.clone();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    match refresh_google_token(&rt_clone).await {
+                        Ok(token) => {
+                            info!("  google — refreshed token via stored refresh token");
+                            Some(token)
+                        }
+                        Err(e) => {
+                            warn!("  google — refresh token failed: {}", e);
+                            None
+                        }
+                    }
                 })
-            } else {
-                None
-            }
-        });
+            })
+        } else {
+            None
+        }
+    });
 
     if let Some(ref token) = google_token {
         let _ = storage.set("google_access_token", token);
@@ -327,7 +356,31 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         model_pins: RwLock::new(std::collections::HashMap::new()),
         provider_priorities: DashMap::new(),
         provider_pricing_modes: DashMap::new(),
+        disabled_providers: DashMap::new(),
+        disabled_models: DashMap::new(),
+        rules: rules::RulesEngine::new(),
     });
+
+    // Load disabled providers/models from DB
+    if let Ok(entries) = state.storage.get_matching("disabled_provider:%") {
+        for (key, val) in entries {
+            if val == "1" {
+                if let Some(name) = key.strip_prefix("disabled_provider:") {
+                    state.disabled_providers.insert(name.to_string(), true);
+                    info!("  {} — disabled", name);
+                }
+            }
+        }
+    }
+    if let Ok(entries) = state.storage.get_matching("disabled_model:%") {
+        for (key, val) in entries {
+            if val == "1" {
+                if let Some(k) = key.strip_prefix("disabled_model:") {
+                    state.disabled_models.insert(k.to_string(), true);
+                }
+            }
+        }
+    }
 
     // Initialize provider priorities and pricing modes from config
     for (name, pconfig) in &state.config.providers {
@@ -544,9 +597,16 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
             "x-coalesce-session-id".parse().unwrap(),
         ]);
 
+    // Check if React web UI is available — if so, it takes over / and /dashboard
+    let web_dirs = vec![
+        std::path::PathBuf::from("desktop/dist"),
+        std::path::PathBuf::from("../desktop/dist"),
+        data_dir.join("web"),
+    ];
+    let has_web_ui = web_dirs.iter().any(|d| d.join("index.html").exists());
+
     let mut app = Router::new()
-        .route("/", get(dashboard))
-        .route("/dashboard", get(dashboard))
+        .route("/dashboard/embedded", get(dashboard))
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/models", get(list_models))
@@ -565,12 +625,14 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/events", get(api_events))
         .route("/api/v1/providers/manage", post(api_create_provider))
         .route("/api/v1/providers/manage/{name}", put(api_update_provider).delete(api_delete_provider))
+        .route("/api/v1/providers/{name}/toggle", post(api_provider_toggle))
+        .route("/api/v1/providers/{name}/models/{model}/toggle", post(api_model_toggle))
         .route("/api/v1/providers/{name}/billing", put(api_update_billing))
         .route("/api/v1/providers/{name}/test", post(api_test_provider))
+        .route("/api/v1/providers/{name}/refresh", post(api_provider_refresh))
         .route("/api/v1/auth/copilot/start", post(api_copilot_auth_start))
         .route("/api/v1/auth/copilot/poll", post(api_copilot_auth_poll))
         .route("/api/v1/providers/ollama/models", get(api_ollama_models))
-        .route("/api/v1/providers/ollama/models/{model}/toggle", post(api_ollama_toggle_model))
         .route("/api/v1/ollama/pull", post(api_ollama_pull))
         .route("/api/v1/ollama/models/{model}", delete(api_ollama_delete_model))
         .route("/api/v1/ollama/running", get(api_ollama_running))
@@ -591,29 +653,45 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/auth/google/start", post(api_google_auth_start))
         .route("/api/v1/auth/google/callback", get(api_google_auth_callback))
         .route("/api/v1/auth/google/poll", post(api_google_auth_poll))
+        .route("/api/v1/parse", post(api_parse_document))
         .route("/api/v1/feedback", post(api_feedback))
         .route("/api/v1/quality/scores", get(api_quality_scores))
+        // Profiles
+        .route("/api/v1/profiles", get(api_profiles_list).post(api_profile_save))
+        .route("/api/v1/profiles/import", post(api_profile_import))
+        .route("/api/v1/profiles/{name}", get(api_profile_get).put(api_profile_update).delete(api_profile_delete))
+        .route("/api/v1/profiles/{name}/activate", post(api_profile_activate))
+        // Enhanced search & export
+        .route("/api/v1/stats/search", get(api_stats_search))
+        .route("/api/v1/stats/export/json", get(api_export_json))
+        .route("/api/v1/stats/export/csv", get(api_export_csv))
+        .route("/api/v1/stats/export/costs/csv", get(api_export_costs_csv))
+        // Anthropic Messages API compatibility (for Claude Code harness)
+        .route("/v1/messages", post(anthropic_messages))
+        // Harness management
+        .route("/api/v1/harnesses", get(api_harnesses_list))
+        .route("/api/v1/harnesses/{id}/configure", post(api_harness_configure))
+        .route("/api/v1/harnesses/{id}/restore", post(api_harness_restore))
+        // Failover rules
+        .route("/api/v1/rules", get(api_rules_list).post(api_rules_create))
+        .route("/api/v1/rules/presets", get(api_rules_presets))
+        .route("/api/v1/rules/{id}", put(api_rules_update).delete(api_rules_delete))
+        .route("/api/v1/rules/{id}/toggle", post(api_rules_toggle))
         .route("/metrics", get(api_metrics))
         .layer(cors)
         .with_state(state);
 
-    // Serve the React web UI as a fallback for unmatched routes.
-    // Looks for built files in several locations:
-    //   1. ./desktop/dist (development)
-    //   2. ../desktop/dist (development from crate dir)
-    //   3. ~/.local/share/coalesce/web (installed)
-    let web_dirs = vec![
-        std::path::PathBuf::from("desktop/dist"),
-        std::path::PathBuf::from("../desktop/dist"),
-        data_dir.join("web"),
-    ];
+    // Serve the React web UI as the primary interface.
+    // Falls back to the embedded dashboard if no built React app is found.
     if let Some(web_dir) = web_dirs.iter().find(|d| d.join("index.html").exists()) {
         let index = web_dir.join("index.html");
         info!("Serving web UI from {}", web_dir.display());
         let serve = ServeDir::new(web_dir.clone()).not_found_service(ServeFile::new(index));
         app = app.fallback_service(serve);
     } else {
-        info!("No web UI found; embedded dashboard only at /dashboard");
+        // No React build — fall back to embedded dashboard at /
+        info!("No web UI found; using embedded dashboard at /");
+        app = app.route("/", get(dashboard)).route("/dashboard", get(dashboard));
     }
 
     info!("Coalesce proxy listening on {}", addr);
@@ -886,6 +964,7 @@ async fn chat_completions(
                         if let Ok(stream) = provider.chat_stream(&forwarded).await {
                             if let Some(cb) = state.circuit_breakers.get(&pinned_provider) { cb.record_success(); }
                             let _ = state.storage.log_request(&RequestLogEntry {
+                                id: None, timestamp: None,
                                 tier: "pinned".into(), score: 0.0,
                                 provider: pinned_provider.clone(), model: pinned_model.clone(),
                                 input_tokens: None, output_tokens: None, cost_usd: None,
@@ -909,6 +988,7 @@ async fn chat_completions(
                             (None, None, None)
                         };
                         let _ = state.storage.log_request(&RequestLogEntry {
+                            id: None, timestamp: None,
                             tier: "pinned".into(), score: 0.0,
                             provider: pinned_provider, model: pinned_model,
                             input_tokens: it, output_tokens: ot, cost_usd: cost,
@@ -967,11 +1047,23 @@ async fn chat_completions(
         .map(|p| p.strategy.as_str())
         .unwrap_or("cheapest_capable");
 
+    // Detect if request contains image content (requires vision-capable model)
+    let has_images = request.messages.iter().any(|msg| {
+        match &msg.content {
+            Some(MessageContent::Parts(parts)) => {
+                parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. }))
+            }
+            _ => false,
+        }
+    });
+
     // 4. Build candidate list sorted by cost, filtering out open circuit breakers
+    // For Reasoning tier: if no Reasoning models exist, fall back to Complex
+    let effective_tier = scoring.tier;
     let mut candidates: Vec<(usize, &ModelInfo)> = models_snapshot
         .iter()
         .enumerate()
-        .filter(|(_, m)| m.quality_tier.can_handle(&scoring.tier))
+        .filter(|(_, m)| m.quality_tier.can_handle(&effective_tier))
         .filter(|(_, m)| {
             state
                 .circuit_breakers
@@ -992,7 +1084,133 @@ async fn chat_completions(
             // Skip models with negative pricing (OpenRouter uses this to disable beta models)
             m.input_price_per_m >= 0.0 && m.output_price_per_m >= 0.0
         })
+        .filter(|(_, m)| {
+            // Skip disabled providers and models
+            !state.disabled_providers.contains_key(&m.provider)
+                && !state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id))
+        })
+        .filter(|(_, m)| {
+            // If request contains images, only allow vision-capable models
+            if has_images { m.vision } else { true }
+        })
         .collect();
+
+    // 4b. Evaluate failover rules and apply triggered actions
+    let rule_actions = {
+        let mut quota_percent = std::collections::HashMap::new();
+        let mut error_rates = std::collections::HashMap::new();
+        let mut avg_latency_ms = std::collections::HashMap::new();
+        let mut circuit_open = std::collections::HashMap::new();
+
+        for entry in state.circuit_breakers.iter() {
+            circuit_open.insert(entry.key().clone(), !entry.value().is_available());
+        }
+
+        // Compute budget percent (spent / limit * 100)
+        let total_limit = state.config.budget.total_limit_usd;
+        let budget_percent = if total_limit > 0.0 {
+            (state.budget.total_spent_usd() / total_limit) * 100.0
+        } else {
+            0.0
+        };
+
+        // Compute per-provider error rates and latency from recent request logs
+        if let Ok(recent) = state.storage.recent_requests(100) {
+            let mut provider_totals: std::collections::HashMap<String, (u64, u64, u64, u64)> = std::collections::HashMap::new();
+            for req in &recent {
+                let entry = provider_totals.entry(req.provider.clone()).or_insert((0, 0, 0, 0));
+                entry.0 += 1; // total requests
+                if !req.success { entry.1 += 1; } // failures
+                if let Some(ms) = req.latency_ms { entry.2 += ms; entry.3 += 1; } // latency sum, count
+            }
+            for (prov, (total, failures, lat_sum, lat_count)) in &provider_totals {
+                if *total > 0 {
+                    error_rates.insert(prov.clone(), (*failures as f64 / *total as f64) * 100.0);
+                }
+                if *lat_count > 0 {
+                    avg_latency_ms.insert(prov.clone(), lat_sum / lat_count);
+                }
+            }
+        }
+
+        // Quota percent is harder to compute generically; use 100.0 as default (no quota info)
+        for entry in state.circuit_breakers.iter() {
+            quota_percent.insert(entry.key().clone(), 100.0_f64);
+        }
+
+        let ctx = rules::EvalContext {
+            quota_percent,
+            error_rates,
+            avg_latency_ms,
+            budget_percent,
+            circuit_open,
+        };
+        state.rules.evaluate(&ctx)
+    };
+
+    // Apply triggered rule actions
+    let mut rules_disabled_providers: Vec<String> = Vec::new();
+    let mut rules_preferred_provider: Option<(String, u32)> = None;
+    for action in &rule_actions {
+        match &action.action {
+            rules::RuleAction::DisableProvider { provider } => {
+                info!(rule = %action.rule_name, provider = %provider, "Rule disabled provider");
+                rules_disabled_providers.push(provider.clone());
+            }
+            rules::RuleAction::PreferProvider { provider, priority } => {
+                info!(rule = %action.rule_name, provider = %provider, priority = priority, "Rule preferred provider");
+                rules_preferred_provider = Some((provider.clone(), *priority));
+            }
+            rules::RuleAction::Notify { message } => {
+                info!(rule = %action.rule_name, message = %message, "Rule notification");
+                let _ = state.event_tx.send(ProxyEvent::BudgetAlert {
+                    threshold_pct: 0,
+                    spent_usd: state.budget.total_spent_usd(),
+                    limit_usd: state.config.budget.total_limit_usd,
+                });
+            }
+            rules::RuleAction::SwitchProfile { profile } => {
+                info!(rule = %action.rule_name, profile = %profile, "Rule switching profile");
+                // Profile switch is a heavy operation; just log for now.
+                // Full profile switching would reload providers, which we don't want mid-request.
+            }
+        }
+    }
+
+    // Filter out providers disabled by rules
+    if !rules_disabled_providers.is_empty() {
+        candidates.retain(|(_, m)| !rules_disabled_providers.contains(&m.provider));
+    }
+
+    // If Reasoning tier found no candidates, fall back to Complex tier
+    if candidates.is_empty() && scoring.tier == coalesce_core::types::QualityTier::Reasoning {
+        info!("No Reasoning-tier models available, falling back to Complex tier");
+        candidates = models_snapshot
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.quality_tier.can_handle(&coalesce_core::types::QualityTier::Complex))
+            .filter(|(_, m)| {
+                state.circuit_breakers.get(&m.provider)
+                    .map(|cb| cb.is_available()).unwrap_or(true)
+            })
+            .filter(|(_, m)| !state.disabled_providers.contains_key(&m.provider)
+                && !state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id)))
+            .filter(|(_, m)| m.input_price_per_m >= 0.0 && m.output_price_per_m >= 0.0)
+            .collect();
+        if !rules_disabled_providers.is_empty() {
+            candidates.retain(|(_, m)| !rules_disabled_providers.contains(&m.provider));
+        }
+    }
+
+    if has_images && candidates.is_empty() {
+        return Json(serde_json::json!({
+            "error": {
+                "message": "No vision-capable model is available to handle this request containing images. Enable a vision-capable model or provider.",
+                "type": "routing_error",
+                "code": "no_vision_model"
+            }
+        })).into_response();
+    }
 
     // Build ordered candidate list: pinned models/providers first, then cost-sorted remainder
     let tier_pins: Vec<coalesce_core::router::config::ModelPin> = state.model_pins.read().unwrap()
@@ -1024,8 +1242,13 @@ async fn chat_completions(
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => {
                 // Sort by provider priority first (lower = better)
-                let prio_a = state.provider_priorities.get(&model_a.provider).map(|v| *v).unwrap_or(50);
-                let prio_b = state.provider_priorities.get(&model_b.provider).map(|v| *v).unwrap_or(50);
+                // Rules-preferred provider gets boosted priority
+                let mut prio_a = state.provider_priorities.get(&model_a.provider).map(|v| *v).unwrap_or(50);
+                let mut prio_b = state.provider_priorities.get(&model_b.provider).map(|v| *v).unwrap_or(50);
+                if let Some((ref preferred, ref rule_prio)) = rules_preferred_provider {
+                    if model_a.provider == *preferred { prio_a = prio_a.min(*rule_prio); }
+                    if model_b.provider == *preferred { prio_b = prio_b.min(*rule_prio); }
+                }
                 if prio_a != prio_b {
                     return prio_a.cmp(&prio_b);
                 }
@@ -1061,9 +1284,16 @@ async fn chat_completions(
     // 5. Fallback chain — try candidates in order
     let mut last_error = String::new();
     let attempt_limit = candidates.len().min(MAX_FALLBACK_ATTEMPTS);
+    // Track providers that returned auth errors (401/403) — skip them on subsequent attempts
+    let mut auth_failed_providers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for attempt in 0..attempt_limit {
         let (_, selected_model) = candidates[attempt];
+
+        // Skip providers that already returned auth errors in this request
+        if auth_failed_providers.contains(&selected_model.provider) {
+            continue;
+        }
 
         let provider = match providers_snapshot
             .iter()
@@ -1103,6 +1333,7 @@ async fn chat_completions(
 
                     // Log request (no token counts for streaming)
                     let _ = state.storage.log_request(&RequestLogEntry {
+                        id: None, timestamp: None,
                         tier: scoring.tier.to_string(),
                         score: scoring.score,
                         provider: selected_model.provider.clone(),
@@ -1114,6 +1345,24 @@ async fn chat_completions(
                         success: true,
                     });
 
+                    // Prepend a routing metadata SSE event so the client gets
+                    // routing info even when CORS blocks response headers
+                    let routing_meta = format!(
+                        "data: {}\n\n",
+                        serde_json::json!({
+                            "x_coalesce": {
+                                "tier": scoring.tier.to_string(),
+                                "score": scoring.score,
+                                "provider": selected_model.provider,
+                                "model": selected_model.id,
+                                "attempt": attempt + 1,
+                            }
+                        })
+                    );
+                    let meta_stream = futures::stream::once(async move {
+                        Ok::<_, std::io::Error>(bytes::Bytes::from(routing_meta))
+                    });
+
                     let body_stream = byte_stream.map(|result| {
                         result
                             .map(|bytes| bytes)
@@ -1121,6 +1370,8 @@ async fn chat_completions(
                                 std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
                             })
                     });
+
+                    let combined = meta_stream.chain(body_stream);
 
                     return Response::builder()
                         .status(StatusCode::OK)
@@ -1131,23 +1382,29 @@ async fn chat_completions(
                         .header("X-Coalesce-Provider", &selected_model.provider)
                         .header("X-Coalesce-Tier", scoring.tier.to_string())
                         .header("X-Coalesce-Attempt", (attempt + 1).to_string())
-                        .body(Body::from_stream(body_stream))
+                        .body(Body::from_stream(combined))
                         .unwrap_or_else(|_| {
                             (StatusCode::INTERNAL_SERVER_ERROR, "Stream setup failed")
                                 .into_response()
                         });
                 }
                 Err(e) => {
+                    let err_str = e.to_string();
                     warn!(
                         provider = %provider.name(),
-                        error = %e,
+                        error = %err_str,
                         attempt = attempt + 1,
                         "Stream failed, trying fallback"
                     );
                     if let Some(cb) = state.circuit_breakers.get(&selected_model.provider) {
                         cb.record_failure();
                     }
-                    last_error = e.to_string();
+                    // Auth errors (401/403) mean the entire provider is broken — skip it
+                    if err_str.contains("401") || err_str.contains("403") || err_str.contains("Unauthorized") || err_str.contains("Forbidden") {
+                        warn!(provider = %selected_model.provider, "Auth error — skipping provider for remaining attempts");
+                        auth_failed_providers.insert(selected_model.provider.clone());
+                    }
+                    last_error = err_str;
                     continue;
                 }
             }
@@ -1216,6 +1473,7 @@ async fn chat_completions(
 
                             // Log request
                             let _ = state.storage.log_request(&RequestLogEntry {
+                                id: None, timestamp: None,
                                 tier: scoring.tier.to_string(),
                                 score: scoring.score,
                                 provider: selected_model.provider.clone(),
@@ -1348,6 +1606,7 @@ async fn chat_completions(
 
                             // Log failure
                             let _ = state.storage.log_request(&RequestLogEntry {
+                                id: None, timestamp: None,
                                 tier: scoring.tier.to_string(),
                                 score: scoring.score,
                                 provider: selected_model.provider.clone(),
@@ -1365,7 +1624,12 @@ async fn chat_completions(
                                 is_error: true,
                             });
 
-                            last_error = e.to_string();
+                            let err_str = e.to_string();
+                            if err_str.contains("401") || err_str.contains("403") || err_str.contains("Unauthorized") || err_str.contains("Forbidden") {
+                                warn!(provider = %selected_model.provider, "Auth error — skipping provider for remaining attempts");
+                                auth_failed_providers.insert(selected_model.provider.clone());
+                            }
+                            last_error = err_str;
                             continue;
                         }
                     }
@@ -1381,9 +1645,13 @@ async fn chat_completions(
         "All fallback attempts exhausted"
     );
 
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("Content-Type", "application/json")
+        .header("x-coalesce-tier", scoring.tier.to_string())
+        .header("x-coalesce-attempt", attempt_limit.to_string())
+        .header("Access-Control-Expose-Headers", "x-coalesce-tier, x-coalesce-attempt")
+        .body(Body::from(serde_json::to_string(&serde_json::json!({
             "error": {
                 "message": format!(
                     "All providers failed after {} attempts. Last error: {}",
@@ -1392,9 +1660,8 @@ async fn chat_completions(
                 "type": "all_providers_exhausted",
                 "code": "provider_error",
             }
-        })),
-    )
-        .into_response()
+        })).unwrap()))
+        .unwrap()
 }
 
 fn extract_usage(
@@ -1443,6 +1710,9 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Json<serde_json::V
                 })
                 .unwrap_or_else(|| "Unknown".into());
 
+            let provider_disabled = state.disabled_providers.contains_key(&m.provider);
+            let model_disabled = state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id));
+
             serde_json::json!({
                 "id": m.id,
                 "object": "model",
@@ -1465,6 +1735,7 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Json<serde_json::V
                     "is_available": cost.is_available(),
                 },
                 "circuit_breaker": cb_state,
+                "is_disabled": model_disabled || provider_disabled,
             })
         })
         .collect();
@@ -1569,12 +1840,32 @@ async fn api_providers(State(state): State<Arc<ProxyState>>) -> Json<serde_json:
                 })
             });
 
+            // Check both config and dynamic providers for billing
             let billing = state
                 .config
                 .providers
                 .get(&name)
-                .map(|pc| pc.billing.clone().unwrap_or_else(|| "per_token".into()))
-                .unwrap_or_else(|| "unknown".into());
+                .and_then(|pc| pc.billing.clone())
+                .or_else(|| {
+                    // Check dynamic providers.json
+                    let dp_path = dirs::data_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join("coalesce")
+                        .join("providers.json");
+                    if dp_path.exists() {
+                        std::fs::read_to_string(&dp_path).ok()
+                            .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, ProviderConfig>>(&s).ok())
+                            .and_then(|m| m.get(&name).and_then(|pc| pc.billing.clone()))
+                    } else { None }
+                })
+                .unwrap_or_else(|| {
+                    // Infer from provider type
+                    if name.starts_with("ollama") { "local".into() }
+                    else if name.starts_with("copilot") { "free".into() }
+                    else { "per_token".into() }
+                });
+
+            let is_disabled = state.disabled_providers.contains_key(&name);
 
             let priority = state.provider_priorities.get(&name).map(|v| *v).unwrap_or(50);
             let pricing_mode = state.provider_pricing_modes.get(&name)
@@ -1586,7 +1877,8 @@ async fn api_providers(State(state): State<Arc<ProxyState>>) -> Json<serde_json:
                 "model_count": model_count,
                 "billing": billing,
                 "circuit_breaker": cb_info,
-                "is_available": state.circuit_breakers.get(&name).map(|cb| cb.is_available()).unwrap_or(true),
+                "is_available": !is_disabled && state.circuit_breakers.get(&name).map(|cb| cb.is_available()).unwrap_or(true),
+                "is_disabled": is_disabled,
                 "priority": priority,
                 "pricing_mode": pricing_mode,
             })
@@ -2199,6 +2491,64 @@ async fn api_update_billing(
     Json(serde_json::json!({"status": "ok", "provider": name, "billing": billing_str}))
 }
 
+/// POST /api/v1/providers/{name}/toggle — enable/disable a provider from routing
+async fn api_provider_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let key = format!("disabled_provider:{}", name);
+
+    if enabled {
+        state.disabled_providers.remove(&name);
+        let _ = state.storage.set(&key, "");
+        // Remove the key entirely by setting empty — or we can delete
+        // For simplicity, remove from kv by setting empty and checking on load
+        info!("Enabled provider '{}'", name);
+    } else {
+        state.disabled_providers.insert(name.clone(), true);
+        let _ = state.storage.set(&key, "1");
+        info!("Disabled provider '{}'", name);
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "provider": name,
+        "enabled": enabled,
+    }))
+}
+
+/// POST /api/v1/providers/{name}/models/{model}/toggle — enable/disable a model from routing
+async fn api_model_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath((provider, model)): AxumPath<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    // Model names may contain colons (e.g. phi4-mini:latest) — URL-encoded as ---
+    let model_id = model.replace("---", ":");
+    let compound_key = format!("{}::{}", provider, model_id);
+    let storage_key = format!("disabled_model:{}", compound_key);
+
+    if enabled {
+        state.disabled_models.remove(&compound_key);
+        let _ = state.storage.set(&storage_key, "");
+        info!("Enabled model '{}' on '{}'", model_id, provider);
+    } else {
+        state.disabled_models.insert(compound_key.clone(), true);
+        let _ = state.storage.set(&storage_key, "1");
+        info!("Disabled model '{}' on '{}'", model_id, provider);
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "provider": provider,
+        "model": model_id,
+        "enabled": enabled,
+    }))
+}
+
 // --- Provider Test / Copilot OAuth / Ollama Models ---
 
 /// POST /api/v1/providers/{name}/test — test connectivity to a provider
@@ -2231,6 +2581,39 @@ async fn api_test_provider(
         }
         Ok(false) => Json(serde_json::json!({"ok": false, "error": "Health check returned false"})),
         Err(e) => Json(serde_json::json!({"ok": false, "error": format!("{}", e)})),
+    }
+}
+
+/// POST /api/v1/providers/{name}/refresh — re-fetch models from provider API
+async fn api_provider_refresh(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let providers_snapshot: Vec<Arc<dyn Provider>> = state.providers.read().unwrap().clone();
+    let provider = providers_snapshot.iter().find(|p| p.name() == name);
+
+    let Some(p) = provider else {
+        return Json(serde_json::json!({"ok": false, "error": "Provider not found"}));
+    };
+
+    match p.list_models().await {
+        Ok(new_models) => {
+            let count = new_models.len();
+            // Replace this provider's models in the global model list
+            let mut models = state.models.write().unwrap();
+            models.retain(|m| m.provider != name);
+            models.extend(new_models);
+            info!(provider = %name, count, "Refreshed models from API");
+            Json(serde_json::json!({
+                "ok": true,
+                "models": count,
+                "message": format!("Refreshed — {} models loaded", count)
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("Model refresh failed: {}", e)
+        })),
     }
 }
 
@@ -3287,6 +3670,19 @@ async fn refresh_google_token(refresh_token: &str) -> Result<String, String> {
 const GOOGLE_OAUTH_CODE_VERIFIER: &str = "cFH3lPzU2FhJjQhHlGqKqQhHlGqKqQhHlGqKqQhHlGq";
 const CLOUDCODE_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 
+/// Quick validation of a Google OAuth token via tokeninfo endpoint
+async fn validate_google_token(token: &str) -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    client
+        .get(format!("https://oauth2.googleapis.com/tokeninfo?access_token={}", token))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
+}
+
 /// Read the fresh OAuth token from Antigravity's local SQLite DB
 fn read_antigravity_token() -> Option<String> {
     let home = dirs::home_dir()?;
@@ -3339,7 +3735,14 @@ async fn discover_google_models(token: &str) -> Vec<ModelInfo> {
             else if paid.contains("pro") || current == "standard-tier" { "pro" }
             else { "free" }
         }
-        _ => "free",
+        Ok(r) => {
+            warn!("  google — loadCodeAssist failed: {}", r.status());
+            "free"
+        }
+        Err(e) => {
+            warn!("  google — loadCodeAssist request failed: {}", e);
+            "free"
+        }
     };
     info!("  google — detected tier: {}", tier);
 
@@ -3350,7 +3753,7 @@ async fn discover_google_models(token: &str) -> Vec<ModelInfo> {
             max_output: Some(65536), quality_tier: QualityTier::Medium, reasoning: false, vision: true, tool_calling: true },
         ModelInfo { id: "gemini-3.1-pro-low".into(), name: "Gemini 3.1 Pro (Low)".into(), provider: p.into(),
             input_price_per_m: 1.25, output_price_per_m: 5.0, context_window: 1048576,
-            max_output: Some(65536), quality_tier: QualityTier::Complex, reasoning: false, vision: true, tool_calling: true },
+            max_output: Some(65536), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true },
     ];
     if tier == "pro" || tier == "ultra" {
         models.extend(vec![
@@ -3528,6 +3931,112 @@ struct FeedbackRequest {
 }
 
 /// POST /api/v1/feedback — submit quality rating for a model
+/// POST /api/v1/parse — extract text from uploaded documents (PDF, TXT, MD, CSV, JSON)
+async fn api_parse_document(
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let data_str = match body.get("data").and_then(|v| v.as_str()) {
+        Some(d) => d,
+        None => return Json(serde_json::json!({"error": "missing 'data' field (base64)"})).into_response(),
+    };
+    let filename = body.get("filename").and_then(|v| v.as_str()).unwrap_or("file.txt");
+
+    // Strip data URL prefix if present (e.g. "data:application/pdf;base64,...")
+    let raw_b64 = if let Some(pos) = data_str.find(",") {
+        &data_str[pos + 1..]
+    } else {
+        data_str
+    };
+
+    let file_bytes = match base64::engine::general_purpose::STANDARD.decode(raw_b64) {
+        Ok(b) => b,
+        Err(_) => return Json(serde_json::json!({"error": "invalid base64 data"})).into_response(),
+    };
+
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+
+    match ext.as_str() {
+        // Plain text formats — decode directly
+        "txt" | "md" | "json" | "csv" | "html" | "xml" => {
+            let text = String::from_utf8_lossy(&file_bytes).to_string();
+            Json(serde_json::json!({"text": text, "filename": filename})).into_response()
+        }
+        // PDF — use pdf_oxide
+        "pdf" => {
+            let fname = filename.to_string();
+            match tokio::task::spawn_blocking(move || {
+                // Write to temp file (pdf_oxide needs a file path)
+                let mut tmp = tempfile::Builder::new()
+                    .suffix(".pdf")
+                    .tempfile()
+                    .map_err(|e| format!("temp file error: {}", e))?;
+                std::io::Write::write_all(&mut tmp, &file_bytes)
+                    .map_err(|e| format!("write error: {}", e))?;
+                let path = tmp.path().to_path_buf();
+
+                let mut doc = pdf_oxide::PdfDocument::open(path.to_str().unwrap_or(""))
+                    .map_err(|e| format!("PDF open error: {}", e))?;
+                let page_count = doc.page_count()
+                    .map_err(|e| format!("PDF page count error: {}", e))?;
+                let mut all_text = String::new();
+                for i in 0..page_count {
+                    match doc.extract_text(i) {
+                        Ok(text) => {
+                            if !all_text.is_empty() {
+                                all_text.push('\n');
+                            }
+                            all_text.push_str(&text);
+                        }
+                        Err(_) => {} // skip unreadable pages
+                    }
+                }
+                Ok::<String, String>(all_text)
+            }).await {
+                Ok(Ok(text)) => Json(serde_json::json!({"text": text, "filename": fname})).into_response(),
+                Ok(Err(e)) => Json(serde_json::json!({"error": e})).into_response(),
+                Err(e) => Json(serde_json::json!({"error": format!("extraction failed: {}", e)})).into_response(),
+            }
+        }
+        // DOCX — extract text from word/document.xml inside the ZIP
+        "docx" => {
+            let fname = filename.to_string();
+            match tokio::task::spawn_blocking(move || {
+                let cursor = std::io::Cursor::new(file_bytes);
+                let mut archive = zip::ZipArchive::new(cursor)
+                    .map_err(|e| format!("DOCX open error: {}", e))?;
+                let mut xml = String::new();
+                if let Ok(mut file) = archive.by_name("word/document.xml") {
+                    std::io::Read::read_to_string(&mut file, &mut xml)
+                        .map_err(|e| format!("DOCX read error: {}", e))?;
+                }
+                // Strip XML tags to get plain text
+                let mut text = String::new();
+                let mut in_tag = false;
+                for ch in xml.chars() {
+                    match ch {
+                        '<' => in_tag = true,
+                        '>' => { in_tag = false; }
+                        _ if !in_tag => text.push(ch),
+                        _ => {}
+                    }
+                }
+                // Clean up whitespace
+                let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                Ok::<String, String>(text)
+            }).await {
+                Ok(Ok(text)) => Json(serde_json::json!({"text": text, "filename": fname})).into_response(),
+                Ok(Err(e)) => Json(serde_json::json!({"error": e})).into_response(),
+                Err(e) => Json(serde_json::json!({"error": format!("extraction failed: {}", e)})).into_response(),
+            }
+        }
+        _ => {
+            Json(serde_json::json!({
+                "error": format!("Unsupported format '.{}'. Supported: pdf, docx, txt, md, json, csv, html, xml", ext)
+            })).into_response()
+        }
+    }
+}
+
 async fn api_feedback(
     State(state): State<Arc<ProxyState>>,
     Json(body): Json<FeedbackRequest>,
@@ -3561,6 +4070,642 @@ async fn api_quality_scores(State(state): State<Arc<ProxyState>>) -> Json<serde_
     Json(serde_json::json!({"scores": scores}))
 }
 
+// ---------------------------------------------------------------------------
+// Harness management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/harnesses — list all harnesses and their status
+async fn api_harnesses_list(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let proxy_url = format!("http://{}:{}", state.config.server.host, state.config.server.port);
+    let harnesses = harness::detect_all(&proxy_url);
+    Json(serde_json::json!({ "harnesses": harnesses }))
+}
+
+/// POST /api/v1/harnesses/{id}/configure — configure a harness to use Coalesce
+async fn api_harness_configure(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let proxy_url = format!("http://{}:{}", state.config.server.host, state.config.server.port);
+    let result = harness::configure_harness(&id, &proxy_url);
+    Json(serde_json::json!(result))
+}
+
+/// POST /api/v1/harnesses/{id}/restore — restore a harness to its original config
+async fn api_harness_restore(
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let result = harness::restore_harness(&id);
+    Json(serde_json::json!(result))
+}
+
+// ---------------------------------------------------------------------------
+// Failover rules endpoints
+// ---------------------------------------------------------------------------
+
+async fn api_rules_list(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "rules": state.rules.list() }))
+}
+
+async fn api_rules_create(
+    State(state): State<Arc<ProxyState>>,
+    Json(rule): Json<rules::FailoverRule>,
+) -> Json<serde_json::Value> {
+    state.rules.add(rule.clone());
+    Json(serde_json::json!({ "status": "created", "rule": rule }))
+}
+
+async fn api_rules_presets() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "presets": rules::preset_rules() }))
+}
+
+async fn api_rules_update(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(rule): Json<rules::FailoverRule>,
+) -> Json<serde_json::Value> {
+    if state.rules.update(&id, rule) {
+        Json(serde_json::json!({ "status": "updated" }))
+    } else {
+        Json(serde_json::json!({ "status": "not_found" }))
+    }
+}
+
+async fn api_rules_delete(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    if state.rules.delete(&id) {
+        Json(serde_json::json!({ "status": "deleted" }))
+    } else {
+        Json(serde_json::json!({ "status": "not_found" }))
+    }
+}
+
+async fn api_rules_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.rules.toggle(&id) {
+        Some(enabled) => Json(serde_json::json!({ "status": "toggled", "enabled": enabled })),
+        None => Json(serde_json::json!({ "status": "not_found" })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Anthropic Messages API compatibility — POST /v1/messages
+// Accepts Anthropic Messages format, translates to internal ChatRequest,
+// routes through the same engine, translates response back.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AnthropicMessagesRequest {
+    model: String,
+    #[serde(default = "default_max_tokens")]
+    max_tokens: u32,
+    #[serde(default)]
+    system: Option<serde_json::Value>, // String or array of content blocks
+    messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    top_p: Option<f64>,
+    #[serde(default)]
+    tools: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    tool_choice: Option<serde_json::Value>,
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+fn default_max_tokens() -> u32 { 4096 }
+
+/// Translate Anthropic Messages request to internal ChatRequest (OpenAI format)
+fn anthropic_to_chat_request(req: AnthropicMessagesRequest) -> ChatRequest {
+    let mut messages = Vec::new();
+
+    // System message
+    if let Some(system) = req.system {
+        let system_text = match system {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Array(arr) => {
+                arr.iter()
+                    .filter_map(|block| block.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => String::new(),
+        };
+        if !system_text.is_empty() {
+            messages.push(Message {
+                role: "system".into(),
+                content: Some(MessageContent::Text(system_text)),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                extra: Default::default(),
+            });
+        }
+    }
+
+    // User/assistant messages
+    for msg in &req.messages {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+
+        // Handle content as string or array of blocks
+        let content_val = msg.get("content");
+
+        match content_val {
+            Some(serde_json::Value::String(text)) => {
+                messages.push(Message {
+                    role: role.into(),
+                    content: Some(MessageContent::Text(text.clone())),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    extra: Default::default(),
+                });
+            }
+            Some(serde_json::Value::Array(blocks)) => {
+                let mut text_parts = Vec::new();
+                let mut tool_calls_out = Vec::new();
+                let mut tool_result_id = None;
+                let mut image_parts: Vec<ContentPart> = Vec::new();
+
+                for block in blocks {
+                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                                text_parts.push(t.to_string());
+                            }
+                        }
+                        "image" => {
+                            if let Some(source) = block.get("source") {
+                                let media_type = source.get("media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+                                let data = source.get("data").and_then(|d| d.as_str()).unwrap_or("");
+                                image_parts.push(ContentPart::ImageUrl {
+                                    image_url: coalesce_core::types::ImageUrl {
+                                        url: format!("data:{};base64,{}", media_type, data),
+                                        detail: None,
+                                    },
+                                });
+                            }
+                        }
+                        "tool_use" => {
+                            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                            tool_calls_out.push(serde_json::json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": serde_json::to_string(&input).unwrap_or_default(),
+                                }
+                            }));
+                        }
+                        "tool_result" => {
+                            tool_result_id = block.get("tool_use_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+                            if let Some(content) = block.get("content") {
+                                match content {
+                                    serde_json::Value::String(s) => text_parts.push(s.clone()),
+                                    serde_json::Value::Array(arr) => {
+                                        for item in arr {
+                                            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                                text_parts.push(t.to_string());
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some(tcid) = tool_result_id {
+                    // This is a tool result message
+                    messages.push(Message {
+                        role: "tool".into(),
+                        content: Some(MessageContent::Text(text_parts.join("\n"))),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: Some(tcid),
+                        extra: Default::default(),
+                    });
+                } else if !tool_calls_out.is_empty() {
+                    // Assistant with tool calls
+                    messages.push(Message {
+                        role: role.into(),
+                        content: if text_parts.is_empty() { None } else { Some(MessageContent::Text(text_parts.join("\n"))) },
+                        name: None,
+                        tool_calls: Some(tool_calls_out),
+                        tool_call_id: None,
+                        extra: Default::default(),
+                    });
+                } else if !image_parts.is_empty() {
+                    // Message with images
+                    let mut parts: Vec<ContentPart> = text_parts.iter().map(|t| ContentPart::Text { text: t.clone() }).collect();
+                    parts.extend(image_parts);
+                    messages.push(Message {
+                        role: role.into(),
+                        content: Some(MessageContent::Parts(parts)),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        extra: Default::default(),
+                    });
+                } else {
+                    messages.push(Message {
+                        role: role.into(),
+                        content: Some(MessageContent::Text(text_parts.join("\n"))),
+                        name: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                        extra: Default::default(),
+                    });
+                }
+            }
+            _ => {
+                messages.push(Message {
+                    role: role.into(),
+                    content: None,
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    extra: Default::default(),
+                });
+            }
+        }
+    }
+
+    // Translate Anthropic tools to OpenAI format
+    let tools = req.tools.map(|tools| {
+        tools.iter().filter_map(|t| {
+            let name = t.get("name")?.as_str()?;
+            let desc = t.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let schema = t.get("input_schema").cloned().unwrap_or(serde_json::json!({"type": "object"}));
+            Some(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": desc,
+                    "parameters": schema,
+                }
+            }))
+        }).collect()
+    });
+
+    ChatRequest {
+        model: req.model,
+        messages,
+        stream: req.stream,
+        max_tokens: Some(req.max_tokens),
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stop: None,
+        tools,
+        tool_choice: req.tool_choice.map(|tc| {
+            if let Some(obj) = tc.as_object() {
+                if let Some(tc_type) = obj.get("type").and_then(|t| t.as_str()) {
+                    match tc_type {
+                        "auto" => serde_json::json!("auto"),
+                        "any" => serde_json::json!("required"),
+                        "tool" => {
+                            if let Some(name) = obj.get("name").and_then(|n| n.as_str()) {
+                                serde_json::json!({"type": "function", "function": {"name": name}})
+                            } else {
+                                serde_json::json!("auto")
+                            }
+                        }
+                        _ => serde_json::json!("auto"),
+                    }
+                } else {
+                    tc
+                }
+            } else {
+                tc
+            }
+        }),
+        response_format: None,
+        extra: Default::default(),
+    }
+}
+
+/// Translate OpenAI-format response back to Anthropic Messages format
+fn chat_response_to_anthropic(resp: &serde_json::Value, model: &str) -> serde_json::Value {
+    let choices = resp.get("choices").and_then(|c| c.as_array());
+    let mut content_blocks = Vec::new();
+    let mut stop_reason = "end_turn".to_string();
+
+    if let Some(choices) = choices {
+        if let Some(choice) = choices.first() {
+            // Finish reason
+            if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                stop_reason = match fr {
+                    "stop" => "end_turn",
+                    "length" => "max_tokens",
+                    "tool_calls" => "tool_use",
+                    _ => "end_turn",
+                }.to_string();
+            }
+
+            let msg = choice.get("message").unwrap_or(&serde_json::Value::Null);
+
+            // Text content
+            if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                if !text.is_empty() {
+                    content_blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+            }
+
+            // Tool calls
+            if let Some(tool_calls) = msg.get("tool_calls").and_then(|tc| tc.as_array()) {
+                for tc in tool_calls {
+                    if let Some(func) = tc.get("function") {
+                        let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("call_0");
+                        let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let args_str = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+                        let input: serde_json::Value = serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                        content_blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": input,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    if content_blocks.is_empty() {
+        content_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": "",
+        }));
+    }
+
+    // Usage
+    let usage = resp.get("usage").map(|u| {
+        serde_json::json!({
+            "input_tokens": u.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+            "output_tokens": u.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0),
+        })
+    }).unwrap_or(serde_json::json!({"input_tokens": 0, "output_tokens": 0}));
+
+    let msg_id = resp.get("id").and_then(|i| i.as_str()).unwrap_or("msg_coalesce");
+
+    serde_json::json!({
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "content": content_blocks,
+        "model": model,
+        "stop_reason": stop_reason,
+        "stop_sequence": null,
+        "usage": usage,
+    })
+}
+
+/// Translate OpenAI SSE chunk to Anthropic SSE events
+fn chat_stream_chunk_to_anthropic(chunk_data: &str, block_idx: &mut usize, started: &mut bool) -> String {
+    let mut output = String::new();
+
+    if chunk_data == "[DONE]" {
+        output.push_str("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n");
+        return output;
+    }
+
+    if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(chunk_data) {
+        if !*started {
+            *started = true;
+            // Send message_start
+            let model = chunk.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
+            output.push_str(&format!(
+                "event: message_start\ndata: {}\n\n",
+                serde_json::json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": chunk.get("id").and_then(|i| i.as_str()).unwrap_or("msg_coalesce"),
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [],
+                        "model": model,
+                        "stop_reason": null,
+                        "stop_sequence": null,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}
+                    }
+                })
+            ));
+            // Send content_block_start
+            output.push_str(&format!(
+                "event: content_block_start\ndata: {}\n\n",
+                serde_json::json!({
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""}
+                })
+            ));
+        }
+
+        if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
+            if let Some(choice) = choices.first() {
+                let delta = choice.get("delta").unwrap_or(&serde_json::Value::Null);
+
+                // Text content
+                if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
+                    output.push_str(&format!(
+                        "event: content_block_delta\ndata: {}\n\n",
+                        serde_json::json!({
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": text}
+                        })
+                    ));
+                }
+
+                // Finish reason
+                if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                    let stop_reason = match fr {
+                        "stop" => "end_turn",
+                        "length" => "max_tokens",
+                        "tool_calls" => "tool_use",
+                        _ => "end_turn",
+                    };
+                    output.push_str(&format!(
+                        "event: content_block_stop\ndata: {}\n\n",
+                        serde_json::json!({"type": "content_block_stop", "index": 0})
+                    ));
+                    output.push_str(&format!(
+                        "event: message_delta\ndata: {}\n\n",
+                        serde_json::json!({
+                            "type": "message_delta",
+                            "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                            "usage": {"output_tokens": 0}
+                        })
+                    ));
+                }
+            }
+        }
+    }
+    output
+}
+
+/// POST /v1/messages — Anthropic Messages API compatibility endpoint
+async fn anthropic_messages(
+    State(state): State<Arc<ProxyState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AnthropicMessagesRequest>,
+) -> Response {
+    let is_stream = req.stream;
+    let requested_model = req.model.clone();
+
+    // Translate to internal ChatRequest
+    let chat_request = anthropic_to_chat_request(req);
+
+    if is_stream {
+        // Route through the same engine as chat_completions
+        let scoring = coalesce_core::router::route(&chat_request, &state.config.routing);
+        let models = state.models.read().unwrap().clone();
+
+        let mut candidates: Vec<_> = models.iter()
+            .filter(|m| m.quality_tier >= scoring.tier)
+            .filter(|m| {
+                state.circuit_breakers.get(&m.provider)
+                    .map(|cb| cb.is_available())
+                    .unwrap_or(true)
+            })
+            .filter(|m| !state.disabled_providers.contains_key(&m.provider))
+            .filter(|m| !state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id)))
+            .cloned()
+            .collect();
+
+        candidates.sort_by(|a, b| {
+            let pa = state.provider_priorities.get(&a.provider).map(|v| *v).unwrap_or(50);
+            let pb = state.provider_priorities.get(&b.provider).map(|v| *v).unwrap_or(50);
+            pa.cmp(&pb)
+        });
+
+        for model in candidates.iter().take(MAX_FALLBACK_ATTEMPTS) {
+            let provider = state.providers.read().unwrap().iter()
+                .find(|p| p.name() == model.provider)
+                .cloned();
+
+            if let Some(provider) = provider {
+                let mut forwarded = chat_request.clone();
+                forwarded.model = model.id.clone();
+                forwarded.stream = true;
+
+                if let Ok(stream) = provider.chat_stream(&forwarded).await {
+                    if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_success(); }
+
+                    // Translate the OpenAI SSE stream to Anthropic SSE format
+                    let block_idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+                    let anthropic_stream = stream.map(move |result| {
+                        result.map(|bytes| {
+                            let text = String::from_utf8_lossy(&bytes);
+                            let mut output = String::new();
+                            let mut bi = block_idx.load(std::sync::atomic::Ordering::Relaxed);
+                            let mut s = started.load(std::sync::atomic::Ordering::Relaxed);
+
+                            for line in text.lines() {
+                                if let Some(data) = line.strip_prefix("data: ") {
+                                    output.push_str(&chat_stream_chunk_to_anthropic(data, &mut bi, &mut s));
+                                }
+                            }
+
+                            block_idx.store(bi, std::sync::atomic::Ordering::Relaxed);
+                            started.store(s, std::sync::atomic::Ordering::Relaxed);
+                            bytes::Bytes::from(output)
+                        })
+                    });
+
+                    let body_stream = anthropic_stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Content-Type", "text/event-stream")
+                        .header("Cache-Control", "no-cache")
+                        .body(Body::from_stream(body_stream))
+                        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Stream failed").into_response());
+                }
+
+                if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_failure(); }
+            }
+        }
+
+        // All attempts failed
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "All providers failed"}
+            })).unwrap()))
+            .unwrap();
+    }
+
+    // Non-streaming path
+    let scoring_ns = coalesce_core::router::route(&chat_request, &state.config.routing);
+    let models_ns = state.models.read().unwrap().clone();
+
+    let mut candidates: Vec<_> = models_ns.iter()
+        .filter(|m| m.quality_tier >= scoring_ns.tier)
+        .filter(|m| {
+            state.circuit_breakers.get(&m.provider)
+                .map(|cb| cb.is_available())
+                .unwrap_or(true)
+        })
+        .filter(|m| !state.disabled_providers.contains_key(&m.provider))
+        .filter(|m| !state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id)))
+        .cloned()
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        let pa = state.provider_priorities.get(&a.provider).map(|v| *v).unwrap_or(50);
+        let pb = state.provider_priorities.get(&b.provider).map(|v| *v).unwrap_or(50);
+        pa.cmp(&pb)
+    });
+
+    for model in candidates.iter().take(MAX_FALLBACK_ATTEMPTS) {
+        let provider = state.providers.read().unwrap().iter()
+            .find(|p| p.name() == model.provider)
+            .cloned();
+
+        if let Some(provider) = provider {
+            let mut forwarded = chat_request.clone();
+            forwarded.model = model.id.clone();
+            forwarded.stream = false;
+
+            if let Ok(resp) = provider.chat(&forwarded).await {
+                if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_success(); }
+                let anthropic_resp = chat_response_to_anthropic(&resp, &model.id);
+                return Json(anthropic_resp).into_response();
+            }
+
+            if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_failure(); }
+        }
+    }
+
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&serde_json::json!({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "All providers failed"}
+        })).unwrap()))
+        .unwrap()
+}
+
 /// GET /metrics — Prometheus metrics endpoint
 async fn api_metrics(State(state): State<Arc<ProxyState>>) -> Response {
     let body = state.prometheus_handle.render();
@@ -3591,4 +4736,661 @@ async fn api_events(State(state): State<Arc<ProxyState>>) -> Response {
         .header("Connection", "keep-alive")
         .body(Body::from_stream(stream))
         .unwrap()
+}
+
+// ==================== Configuration Profiles (DB-backed) ====================
+
+/// Capture current runtime state as a profile config JSON
+fn capture_current_config(state: &Arc<ProxyState>) -> serde_json::Value {
+    // Read current providers.json
+    let providers_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coalesce")
+        .join("providers.json");
+    let dynamic_providers: std::collections::HashMap<String, ProviderConfig> = if providers_path.exists() {
+        std::fs::read_to_string(&providers_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let mut all_providers = state.config.providers.clone();
+    for (k, v) in dynamic_providers {
+        all_providers.insert(k, v);
+    }
+
+    // Capture priorities
+    let mut priorities = std::collections::HashMap::new();
+    for entry in state.provider_priorities.iter() {
+        let pname = entry.key().clone();
+        let priority = *entry.value();
+        let pricing_mode = state.provider_pricing_modes.get(&pname)
+            .map(|v| v.value().clone())
+            .unwrap_or_else(|| "metered".to_string());
+        priorities.insert(pname, serde_json::json!({
+            "priority": priority,
+            "pricing_mode": pricing_mode,
+        }));
+    }
+
+    // Capture model pins
+    let pins = state.model_pins.read().unwrap().clone();
+    let pins_json = serde_json::to_value(&pins).unwrap_or(serde_json::json!({}));
+
+    // Capture equivalences from disk
+    let eq_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coalesce")
+        .join("model_equivalences.json");
+    let equivalences: std::collections::HashMap<String, Vec<String>> = if eq_path.exists() {
+        std::fs::read_to_string(&eq_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        state.config.routing.model_equivalences.clone()
+    };
+
+    serde_json::json!({
+        "providers": all_providers,
+        "priorities": priorities,
+        "model_pins": pins_json,
+        "equivalences": equivalences,
+    })
+}
+
+/// GET /api/v1/profiles — list all saved profiles
+async fn api_profiles_list(
+    State(state): State<Arc<ProxyState>>,
+) -> Json<serde_json::Value> {
+    match state.storage.list_profiles() {
+        Ok(profiles) => {
+            let active = state.storage.get_active_profile_name().ok().flatten();
+            // Count providers from config_json for each profile
+            let profile_list: Vec<serde_json::Value> = profiles.iter().map(|p| {
+                // Get provider count from the full profile
+                let provider_count = state.storage.get_profile(&p.name).ok().flatten()
+                    .and_then(|row| serde_json::from_str::<serde_json::Value>(&row.config_json).ok())
+                    .and_then(|v| v.get("providers").and_then(|p| p.as_object().map(|o| o.len())))
+                    .unwrap_or(0);
+                serde_json::json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "created_at": p.created_at,
+                    "updated_at": p.updated_at,
+                    "provider_count": provider_count,
+                })
+            }).collect();
+            Json(serde_json::json!({
+                "profiles": profile_list,
+                "active": active,
+            }))
+        }
+        Err(e) => Json(serde_json::json!({
+            "profiles": [],
+            "active": null,
+            "error": format!("{e}"),
+        })),
+    }
+}
+
+/// GET /api/v1/profiles/{name} — get full profile details
+async fn api_profile_get(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.storage.get_profile(&name) {
+        Ok(Some(row)) => {
+            let config: serde_json::Value = serde_json::from_str(&row.config_json)
+                .unwrap_or(serde_json::json!({}));
+            Json(serde_json::json!({
+                "status": "ok",
+                "profile": {
+                    "name": row.name,
+                    "description": row.description,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "is_active": row.is_active,
+                    "providers": config.get("providers"),
+                    "priorities": config.get("priorities"),
+                    "model_pins": config.get("model_pins"),
+                    "equivalences": config.get("equivalences"),
+                }
+            }))
+        }
+        Ok(None) => Json(serde_json::json!({"status": "error", "error": "Profile not found"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    }
+}
+
+/// POST /api/v1/profiles — save current config as a new profile
+async fn api_profile_save(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if name.is_empty() {
+        return Json(serde_json::json!({"status": "error", "error": "Name is required"}));
+    }
+    let description = body.get("description").and_then(|v| v.as_str());
+
+    let config = capture_current_config(&state);
+    let config_json = serde_json::to_string(&config).unwrap_or_default();
+
+    match state.storage.save_profile(&name, description, &config_json) {
+        Ok(_) => {
+            info!("Saved profile '{}' to database", name);
+            Json(serde_json::json!({"status": "ok", "name": name}))
+        }
+        Err(e) => Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    }
+}
+
+/// PUT /api/v1/profiles/{name} — update profile metadata (name/description)
+async fn api_profile_update(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let new_name = body.get("name").and_then(|v| v.as_str());
+    let description = body.get("description").and_then(|v| v.as_str());
+
+    match state.storage.update_profile_meta(&name, new_name, description) {
+        Ok(true) => {
+            let result_name = new_name.unwrap_or(&name);
+            Json(serde_json::json!({"status": "ok", "name": result_name}))
+        }
+        Ok(false) => Json(serde_json::json!({"status": "error", "error": "Profile not found"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    }
+}
+
+/// DELETE /api/v1/profiles/{name} — delete a profile
+async fn api_profile_delete(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    // If this was the active profile, clear that
+    if let Ok(Some(active_name)) = state.storage.get_active_profile_name() {
+        if active_name == name {
+            let _ = state.storage.clear_active_profile();
+        }
+    }
+
+    match state.storage.delete_profile(&name) {
+        Ok(true) => Json(serde_json::json!({"status": "ok"})),
+        Ok(false) => Json(serde_json::json!({"status": "error", "error": "Profile not found"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    }
+}
+
+/// POST /api/v1/profiles/{name}/activate — apply a profile's config
+async fn api_profile_activate(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    let row = match state.storage.get_profile(&name) {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(serde_json::json!({"status": "error", "error": "Profile not found"})),
+        Err(e) => return Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    };
+
+    let config: serde_json::Value = match serde_json::from_str(&row.config_json) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({"status": "error", "error": format!("Invalid config: {e}")})),
+    };
+
+    let providers: std::collections::HashMap<String, ProviderConfig> = config.get("providers")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let priorities: std::collections::HashMap<String, serde_json::Value> = config.get("priorities")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let model_pins_val = config.get("model_pins").cloned().unwrap_or(serde_json::json!({}));
+    let equivalences: std::collections::HashMap<String, Vec<String>> = config.get("equivalences")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    // 1. Write providers.json
+    let data_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coalesce");
+    let _ = std::fs::write(
+        data_dir.join("providers.json"),
+        serde_json::to_string_pretty(&providers).unwrap_or_default(),
+    );
+
+    // 2. Apply priorities
+    state.provider_priorities.clear();
+    state.provider_pricing_modes.clear();
+    for (pname, val) in &priorities {
+        if let Some(p) = val.get("priority").and_then(|v| v.as_u64()) {
+            state.provider_priorities.insert(pname.clone(), p as u32);
+        }
+        if let Some(m) = val.get("pricing_mode").and_then(|v| v.as_str()) {
+            state.provider_pricing_modes.insert(pname.clone(), m.to_string());
+        }
+    }
+    let _ = std::fs::write(
+        data_dir.join("provider_priorities.json"),
+        serde_json::to_string_pretty(&priorities).unwrap_or_default(),
+    );
+
+    // 3. Apply model pins
+    if let Ok(pins) = serde_json::from_value(model_pins_val.clone()) {
+        *state.model_pins.write().unwrap() = pins;
+    }
+    let _ = std::fs::write(
+        data_dir.join("model_pins.json"),
+        serde_json::to_string_pretty(&model_pins_val).unwrap_or_default(),
+    );
+
+    // 4. Apply equivalences
+    let _ = std::fs::write(
+        data_dir.join("model_equivalences.json"),
+        serde_json::to_string_pretty(&equivalences).unwrap_or_default(),
+    );
+    state.model_aliases.clear();
+    for (canonical, aliases) in &equivalences {
+        for alias in aliases {
+            if alias != canonical {
+                state.model_aliases.insert(alias.clone(), canonical.clone());
+            }
+        }
+    }
+
+    // 5. Record active profile in DB
+    let _ = state.storage.set_active_profile(&name);
+
+    info!("Activated profile '{}' with {} providers", name, providers.len());
+    Json(serde_json::json!({
+        "status": "ok",
+        "name": name,
+        "providers_applied": providers.len(),
+        "message": "Profile activated. Restart proxy to fully reload providers."
+    }))
+}
+
+/// POST /api/v1/profiles/import — import a profile from JSON body
+async fn api_profile_import(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if name.is_empty() {
+        return Json(serde_json::json!({"status": "error", "error": "Profile name is required"}));
+    }
+    let description = body.get("description").and_then(|v| v.as_str());
+
+    // Build the config_json from the imported data (may be full profile or just config)
+    let config = if body.get("providers").is_some() {
+        // Direct config fields in body
+        serde_json::json!({
+            "providers": body.get("providers"),
+            "priorities": body.get("priorities"),
+            "model_pins": body.get("model_pins"),
+            "equivalences": body.get("equivalences"),
+        })
+    } else {
+        // Fallback: store the whole body as config
+        body.clone()
+    };
+    let config_json = serde_json::to_string(&config).unwrap_or_default();
+
+    match state.storage.save_profile(&name, description, &config_json) {
+        Ok(_) => Json(serde_json::json!({"status": "ok", "name": name})),
+        Err(e) => Json(serde_json::json!({"status": "error", "error": format!("{e}")})),
+    }
+}
+
+// ==================== Enhanced Search & Export ====================
+
+#[derive(Debug, Deserialize)]
+struct SearchParams {
+    limit: Option<u32>,
+    offset: Option<u32>,
+    provider: Option<String>,
+    tier: Option<String>,
+    model: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
+    search: Option<String>,
+    failures_only: Option<bool>,
+}
+
+/// GET /api/v1/stats/search — advanced request search with filters
+async fn api_stats_search(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<SearchParams>,
+) -> Json<serde_json::Value> {
+    let limit = params.limit.unwrap_or(50).min(500);
+    let offset = params.offset.unwrap_or(0);
+    let failures_only = params.failures_only.unwrap_or(false);
+
+    let entries = state.storage.search_requests(
+        limit, offset,
+        params.provider.as_deref(),
+        params.tier.as_deref(),
+        params.model.as_deref(),
+        params.from,
+        params.to,
+        params.search.as_deref(),
+        failures_only,
+    ).unwrap_or_default();
+
+    let total = state.storage.count_requests(
+        params.provider.as_deref(),
+        params.tier.as_deref(),
+        params.model.as_deref(),
+        params.from,
+        params.to,
+        params.search.as_deref(),
+        failures_only,
+    ).unwrap_or(0);
+
+    Json(serde_json::json!({
+        "entries": entries,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "count": entries.len(),
+    }))
+}
+
+/// GET /api/v1/stats/export/json — export all requests as JSON
+async fn api_export_json(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let limit = params.limit.unwrap_or(10000).min(100000);
+    let failures_only = params.failures_only.unwrap_or(false);
+
+    let entries = state.storage.search_requests(
+        limit, 0,
+        params.provider.as_deref(),
+        params.tier.as_deref(),
+        params.model.as_deref(),
+        params.from,
+        params.to,
+        params.search.as_deref(),
+        failures_only,
+    ).unwrap_or_default();
+
+    let json = serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".to_string());
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Content-Disposition", "attachment; filename=\"coalesce-requests.json\"")
+        .body(Body::from(json))
+        .unwrap()
+}
+
+/// GET /api/v1/stats/export/csv — export requests as CSV
+async fn api_export_csv(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let limit = params.limit.unwrap_or(10000).min(100000);
+    let failures_only = params.failures_only.unwrap_or(false);
+
+    let entries = state.storage.search_requests(
+        limit, 0,
+        params.provider.as_deref(),
+        params.tier.as_deref(),
+        params.model.as_deref(),
+        params.from,
+        params.to,
+        params.search.as_deref(),
+        failures_only,
+    ).unwrap_or_default();
+
+    let mut csv = String::from("id,timestamp,tier,score,provider,model,input_tokens,output_tokens,cost_usd,latency_ms,success\n");
+    for e in &entries {
+        csv.push_str(&format!(
+            "{},{},{},{:.4},{},{},{},{},{},{},{}\n",
+            e.id.unwrap_or(0),
+            e.timestamp.unwrap_or(0),
+            e.tier,
+            e.score,
+            e.provider,
+            e.model,
+            e.input_tokens.map_or(String::new(), |v| v.to_string()),
+            e.output_tokens.map_or(String::new(), |v| v.to_string()),
+            e.cost_usd.map_or(String::new(), |v| format!("{:.6}", v)),
+            e.latency_ms.map_or(String::new(), |v| v.to_string()),
+            if e.success { "true" } else { "false" },
+        ));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/csv")
+        .header("Content-Disposition", "attachment; filename=\"coalesce-requests.csv\"")
+        .body(Body::from(csv))
+        .unwrap()
+}
+
+/// GET /api/v1/stats/export/costs/csv — export cost analytics as CSV
+async fn api_export_costs_csv(
+    State(state): State<Arc<ProxyState>>,
+    Query(params): Query<CostParams>,
+) -> Response {
+    let days = params.days.unwrap_or(30);
+
+    let by_provider = state.storage.costs_by_provider().unwrap_or_default();
+    let daily = state.storage.costs_by_day(days).unwrap_or_default();
+
+    let mut csv = String::from("# Cost by Provider\nprovider,requests,input_tokens,output_tokens,total_cost_usd,avg_latency_ms\n");
+    for p in &by_provider {
+        csv.push_str(&format!(
+            "{},{},{},{},{:.6},{:.0}\n",
+            p.group, p.requests, p.input_tokens, p.output_tokens, p.total_cost_usd, p.avg_latency_ms
+        ));
+    }
+
+    csv.push_str("\n# Daily Costs\ndate,requests,input_tokens,output_tokens,total_cost_usd,free_requests\n");
+    for d in &daily {
+        csv.push_str(&format!(
+            "{},{},{},{},{:.6},{}\n",
+            d.date, d.requests, d.input_tokens, d.output_tokens, d.total_cost_usd, d.free_requests
+        ));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/csv")
+        .header("Content-Disposition", "attachment; filename=\"coalesce-costs.csv\"")
+        .body(Body::from(csv))
+        .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_anthropic_to_chat_simple_text() {
+        let req = AnthropicMessagesRequest {
+            model: "claude-3-opus".into(),
+            max_tokens: 1024,
+            system: Some(serde_json::json!("You are helpful.")),
+            messages: vec![serde_json::json!({"role": "user", "content": "Hello"})],
+            stream: false,
+            temperature: Some(0.7),
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            extra: Default::default(),
+        };
+        let chat = anthropic_to_chat_request(req);
+        assert_eq!(chat.messages.len(), 2); // system + user
+        assert_eq!(chat.messages[0].role, "system");
+        assert_eq!(chat.messages[1].role, "user");
+        match &chat.messages[1].content {
+            Some(MessageContent::Text(t)) => assert_eq!(t, "Hello"),
+            _ => panic!("Expected text content"),
+        }
+        assert_eq!(chat.temperature, Some(0.7));
+    }
+
+    #[test]
+    fn test_anthropic_to_chat_system_array() {
+        let req = AnthropicMessagesRequest {
+            model: "claude-3".into(),
+            max_tokens: 100,
+            system: Some(serde_json::json!([
+                {"type": "text", "text": "Part 1"},
+                {"type": "text", "text": "Part 2"}
+            ])),
+            messages: vec![serde_json::json!({"role": "user", "content": "Hi"})],
+            stream: false,
+            temperature: None, top_p: None, tools: None, tool_choice: None,
+            extra: Default::default(),
+        };
+        let chat = anthropic_to_chat_request(req);
+        match &chat.messages[0].content {
+            Some(MessageContent::Text(t)) => assert_eq!(t, "Part 1\nPart 2"),
+            _ => panic!("Expected text"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_to_chat_content_blocks() {
+        let req = AnthropicMessagesRequest {
+            model: "m".into(),
+            max_tokens: 100,
+            system: None,
+            messages: vec![serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "abc123"}}
+                ]
+            })],
+            stream: false,
+            temperature: None, top_p: None, tools: None, tool_choice: None,
+            extra: Default::default(),
+        };
+        let chat = anthropic_to_chat_request(req);
+        assert_eq!(chat.messages.len(), 1);
+        match &chat.messages[0].content {
+            Some(MessageContent::Parts(parts)) => {
+                assert_eq!(parts.len(), 2); // text + image
+            }
+            _ => panic!("Expected parts content"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_to_chat_tool_use() {
+        let req = AnthropicMessagesRequest {
+            model: "m".into(),
+            max_tokens: 100,
+            system: None,
+            messages: vec![
+                serde_json::json!({"role": "user", "content": "Search for cats"}),
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_1", "name": "search", "input": {"q": "cats"}}
+                    ]
+                }),
+                serde_json::json!({
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "call_1", "content": "Found 42 cats"}
+                    ]
+                }),
+            ],
+            stream: false,
+            temperature: None, top_p: None, tools: None, tool_choice: None,
+            extra: Default::default(),
+        };
+        let chat = anthropic_to_chat_request(req);
+        assert_eq!(chat.messages.len(), 3);
+        // Assistant message should have tool_calls
+        assert!(chat.messages[1].tool_calls.is_some());
+        // Tool result should be role "tool" with tool_call_id
+        assert_eq!(chat.messages[2].role, "tool");
+        assert_eq!(chat.messages[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_chat_response_to_anthropic_text() {
+        let openai_resp = serde_json::json!({
+            "id": "chatcmpl-123",
+            "choices": [{
+                "message": {"role": "assistant", "content": "Hello world"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let anthropic = chat_response_to_anthropic(&openai_resp, "claude-3-opus");
+        assert_eq!(anthropic["type"], "message");
+        assert_eq!(anthropic["role"], "assistant");
+        assert_eq!(anthropic["model"], "claude-3-opus");
+        assert_eq!(anthropic["stop_reason"], "end_turn");
+        assert_eq!(anthropic["content"][0]["type"], "text");
+        assert_eq!(anthropic["content"][0]["text"], "Hello world");
+        assert_eq!(anthropic["usage"]["input_tokens"], 10);
+        assert_eq!(anthropic["usage"]["output_tokens"], 5);
+    }
+
+    #[test]
+    fn test_chat_response_to_anthropic_tool_calls() {
+        let openai_resp = serde_json::json!({
+            "id": "chatcmpl-456",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"NYC\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10}
+        });
+        let anthropic = chat_response_to_anthropic(&openai_resp, "claude-3");
+        assert_eq!(anthropic["stop_reason"], "tool_use");
+        let content = anthropic["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["name"], "get_weather");
+        assert_eq!(content[0]["id"], "call_abc");
+        assert_eq!(content[0]["input"]["city"], "NYC");
+    }
+
+    #[test]
+    fn test_chat_stream_chunk_done() {
+        let mut block_idx = 0;
+        let mut started = false;
+        let output = chat_stream_chunk_to_anthropic("[DONE]", &mut block_idx, &mut started);
+        assert!(output.contains("message_stop"));
+    }
+
+    #[test]
+    fn test_chat_stream_chunk_text_delta() {
+        let mut block_idx = 0;
+        let mut started = false;
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-1",
+            "model": "gpt-4",
+            "choices": [{"delta": {"content": "Hello"}, "index": 0}]
+        });
+        let output = chat_stream_chunk_to_anthropic(
+            &serde_json::to_string(&chunk).unwrap(),
+            &mut block_idx,
+            &mut started,
+        );
+        // Should contain message_start (first chunk) and content_block_delta
+        assert!(started);
+        assert!(output.contains("message_start") || output.contains("content_block_delta"));
+    }
 }

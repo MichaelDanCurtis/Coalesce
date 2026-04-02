@@ -70,31 +70,54 @@ impl OpenAICompatProvider {
         let is_pro = id_lower.contains("pro");
         let is_flash = id_lower.contains("flash");
         let is_nano = id_lower.contains("nano") || id_lower.contains("lite");
+        let is_plus = id_lower.contains("plus");
+        let is_turbo = id_lower.contains("turbo");
 
-        let is_thinking = id_lower.contains("thinking");
-        let quality_tier = if is_thinking {
+        let is_thinking = id_lower.contains("thinking") || id_lower.contains("reason");
+        let is_complex = is_plus || id_lower.contains("opus") || id_lower.contains("ultra");
+
+        // GLM-specific: models with "v" suffix (glm-4.6v, glm-5v-turbo) have vision
+        // GLM 4.5+ series support reasoning (thinking param)
+        let is_glm = id_lower.starts_with("glm");
+        let glm_has_vision = is_glm && id_lower.contains("v") && {
+            // Check it's actually a vision indicator (e.g. "4.6v", "5v-") not just "v" in the name
+            id_lower.contains("4v") || id_lower.contains("5v") || id_lower.contains("6v")
+        };
+        let glm_has_reasoning = is_glm && !is_flash && {
+            // GLM 4.5 and above support thinking param
+            id_lower.contains("glm-4.5") || id_lower.contains("glm-4.6")
+                || id_lower.contains("glm-4.7") || id_lower.contains("glm-5")
+        };
+
+        let is_reasoning = is_pro || is_thinking || glm_has_reasoning;
+        let quality_tier = if is_reasoning {
             crate::types::QualityTier::Reasoning
-        } else if is_pro {
+        } else if is_complex {
             crate::types::QualityTier::Complex
         } else if is_nano {
             crate::types::QualityTier::Simple
+        } else if is_flash || is_turbo {
+            crate::types::QualityTier::Medium
         } else {
             crate::types::QualityTier::Medium
         };
 
-        // Infer pricing from model name (Google Gemini API rates per 1M tokens)
+        // Vision: GLM needs explicit "V" models; Gemini models generally support vision
+        let has_vision = if is_glm { glm_has_vision } else { true };
+
+        // Infer pricing from model name (defaults for unknown providers)
         let (input_price, output_price) = if is_nano {
-            (0.10, 0.40)           // Nano/Lite: cheapest tier
+            (0.10, 0.40)
         } else if is_flash && is_thinking {
-            (0.10, 0.40)           // Flash Thinking: same as flash input, higher output
+            (0.10, 0.40)
         } else if is_flash {
-            (0.075, 0.30)          // Flash: budget tier
+            (0.075, 0.30)
         } else if is_pro && is_thinking {
-            (1.25, 10.0)           // Pro Thinking: premium reasoning
+            (1.25, 10.0)
         } else if is_pro {
-            (1.25, 5.0)            // Pro: standard tier
+            (1.25, 5.0)
         } else {
-            (0.50, 2.0)            // Unknown: moderate default
+            (0.50, 2.0)
         };
 
         ModelInfo {
@@ -104,10 +127,10 @@ impl OpenAICompatProvider {
             input_price_per_m: input_price,
             output_price_per_m: output_price,
             context_window: if is_flash || is_pro { 1048576 } else { 131072 },
-            max_output: Some(65536),
+            max_output: Some(if is_glm && !is_flash { 128000 } else { 65536 }),
             quality_tier,
-            reasoning: is_pro || is_thinking,
-            vision: true,
+            reasoning: is_reasoning,
+            vision: has_vision,
             tool_calling: true,
         }
     }
@@ -247,52 +270,13 @@ pub mod factories {
     use crate::types::QualityTier;
 
     /// GLM/Zhipu AI — open.bigmodel.cn
+    /// Models discovered dynamically via the /models API.
     pub fn glm(api_key: String) -> OpenAICompatProvider {
         OpenAICompatProvider::new(
             "glm".into(),
             "https://open.bigmodel.cn/api/paas/v4".into(),
             api_key,
-            vec![
-                ModelInfo {
-                    id: "glm-4-plus".into(),
-                    name: "GLM-4 Plus".into(),
-                    provider: "glm".into(),
-                    input_price_per_m: 0.7,
-                    output_price_per_m: 0.7,
-                    context_window: 128000,
-                    max_output: Some(4096),
-                    quality_tier: QualityTier::Complex,
-                    reasoning: false,
-                    vision: false,
-                    tool_calling: true,
-                },
-                ModelInfo {
-                    id: "glm-4-flash".into(),
-                    name: "GLM-4 Flash".into(),
-                    provider: "glm".into(),
-                    input_price_per_m: 0.0,
-                    output_price_per_m: 0.0,
-                    context_window: 128000,
-                    max_output: Some(4096),
-                    quality_tier: QualityTier::Medium,
-                    reasoning: false,
-                    vision: false,
-                    tool_calling: true,
-                },
-                ModelInfo {
-                    id: "glm-4v-plus".into(),
-                    name: "GLM-4V Plus".into(),
-                    provider: "glm".into(),
-                    input_price_per_m: 1.4,
-                    output_price_per_m: 1.4,
-                    context_window: 8192,
-                    max_output: Some(1024),
-                    quality_tier: QualityTier::Complex,
-                    reasoning: false,
-                    vision: true,
-                    tool_calling: false,
-                },
-            ],
+            vec![],  // No hardcoded models — fully dynamic
             true,
         )
     }
@@ -312,7 +296,7 @@ pub mod factories {
                     output_price_per_m: 0.0,
                     context_window: 262144,
                     max_output: Some(8192),
-                    quality_tier: QualityTier::Complex,
+                    quality_tier: QualityTier::Reasoning,
                     reasoning: true,
                     vision: true,
                     tool_calling: true,
@@ -456,7 +440,7 @@ mod tests {
         let provider = factories::glm("test-key".into());
         assert_eq!(provider.name(), "glm");
         assert_eq!(provider.base_url, "https://open.bigmodel.cn/api/paas/v4");
-        assert_eq!(provider.known_models.len(), 3);
+        assert!(provider.known_models.is_empty()); // fully dynamic
     }
 
     #[test]

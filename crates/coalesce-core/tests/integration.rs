@@ -149,6 +149,7 @@ fn e2e_storage_roundtrip() {
     // Log a request
     storage
         .log_request(&RequestLogEntry {
+            id: None, timestamp: None,
             tier: "SIMPLE".into(),
             score: 0.05,
             provider: "ollama".into(),

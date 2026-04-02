@@ -343,46 +343,60 @@ fn copilot_model_info(id: &str, display_name: &str, prov: &str, item: &serde_jso
     let lower = id.to_lowercase();
     let lower_name = display_name.to_lowercase();
 
-    // Infer quality tier from model id and display name
-    let (tier, reasoning) = if lower.contains("o1") || lower.contains("o3") || lower.contains("o4")
+    // Extract capabilities.supports object from API response
+    let supports = item.get("capabilities")
+        .and_then(|c| c.get("supports"))
+        .and_then(|s| s.as_object());
+
+    // Copilot API uses "adaptive_thinking", "reasoning_effort" for reasoning capability
+    let api_has_reasoning = supports
+        .map(|o| o.contains_key("adaptive_thinking") || o.contains_key("reasoning_effort")
+             || o.contains_key("reasoning") || o.contains_key("thinking"))
+        .unwrap_or(false);
+
+    // Infer reasoning from name patterns (o1/o3/o4/thinking/reason) or API capabilities
+    let reasoning = lower.contains("o1") || lower.contains("o3") || lower.contains("o4-")
         || lower_name.contains("thinking") || lower_name.contains("reason")
-    {
-        (QualityTier::Reasoning, true)
+        || api_has_reasoning;
+
+    // Infer quality tier from model name — reasoning models always get Reasoning tier
+    let tier = if reasoning {
+        QualityTier::Reasoning
     } else if lower.contains("opus") || lower.contains("pro") || (lower.contains("gpt-4o")
         && !lower.contains("mini"))
     {
-        (QualityTier::Complex, false)
+        QualityTier::Complex
     } else if lower.contains("mini") || lower.contains("flash") || lower_name.contains("medium")
         || lower_name.contains("low")
     {
-        (QualityTier::Medium, false)
+        QualityTier::Medium
     } else if lower.contains("nano") || lower.contains("haiku") {
-        (QualityTier::Simple, false)
+        QualityTier::Simple
     } else {
-        (QualityTier::Complex, false)
+        QualityTier::Complex
     };
 
     // Extract capabilities from API response
-    let has_vision = item.get("capabilities")
-        .and_then(|c| c.get("supports").or(c.get("vision")))
-        .and_then(|s| {
-            // Check for vision in supports object/array
-            if s.is_boolean() { return s.as_bool(); }
-            if let Some(obj) = s.as_object() {
-                return Some(obj.contains_key("vision") || obj.get("vision").and_then(|v| v.as_bool()).unwrap_or(false));
-            }
-            None
+    // Copilot API: capabilities.supports.vision = true (boolean)
+    // Also: capabilities.limits.vision = { max_prompt_images, ... } (object, indicates vision support)
+    let has_vision = supports
+        .and_then(|o| o.get("vision"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            // If supports.vision isn't a bool, check if limits.vision object exists
+            item.get("capabilities")
+                .and_then(|c| c.get("limits"))
+                .and_then(|l| l.get("vision"))
+                .map(|v| v.is_object())
         })
         .unwrap_or(!reasoning && !lower.contains("text-only"));
 
-    let has_tools = item.get("capabilities")
-        .and_then(|c| c.get("supports").or(c.get("tools")))
-        .and_then(|s| {
-            if s.is_boolean() { return s.as_bool(); }
-            if let Some(obj) = s.as_object() {
-                return Some(obj.contains_key("tools") || obj.get("tools").and_then(|v| v.as_bool()).unwrap_or(false));
-            }
-            None
+    // Copilot API: capabilities.supports.tool_calls = true (not "tools")
+    let has_tools = supports
+        .and_then(|o| {
+            o.get("tool_calls").and_then(|v| v.as_bool())
+                .or_else(|| o.get("parallel_tool_calls").and_then(|v| v.as_bool()))
+                .or_else(|| o.get("tools").and_then(|v| v.as_bool()))
         })
         .unwrap_or(!reasoning);
 
@@ -405,14 +419,13 @@ fn copilot_model_info(id: &str, display_name: &str, prov: &str, item: &serde_jso
     let output_price = multiplier * 10.0;
 
     // Try to extract context window from capabilities
+    // Copilot API: capabilities.limits.max_context_window_tokens (total), max_prompt_tokens (input)
     let context_window = item
         .get("capabilities")
         .and_then(|c| c.get("limits"))
-        .and_then(|l| l.get("max_prompt_tokens"))
+        .and_then(|l| l.get("max_context_window_tokens").or(l.get("max_prompt_tokens")))
         .and_then(|v| v.as_u64())
-        // Also try top-level fields
         .or_else(|| item.get("context_window").and_then(|v| v.as_u64()))
-        .or_else(|| item.get("max_context_length").and_then(|v| v.as_u64()))
         .unwrap_or(if lower.contains("claude") { 200000 } else { 128000 }) as u32;
 
     let max_output = item

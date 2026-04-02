@@ -9,6 +9,7 @@ export interface Provider {
     total_failures: number;
   };
   model_count: number;
+  is_disabled?: boolean;
 }
 
 export interface ModelInfo {
@@ -31,6 +32,7 @@ export interface ModelInfo {
     is_available: boolean;
   };
   circuit_breaker: string;
+  is_disabled?: boolean;
 }
 
 export interface Stats {
@@ -53,6 +55,8 @@ export interface QuotaInfo {
 }
 
 export interface RequestEntry {
+  id?: number;
+  timestamp?: number;
   tier: string;
   score: number;
   provider: string;
@@ -62,6 +66,26 @@ export interface RequestEntry {
   cost_usd: number | null;
   latency_ms: number | null;
   success: boolean;
+}
+
+export interface ConfigProfile {
+  name: string;
+  description?: string;
+  created_at: number;
+  updated_at: number;
+  provider_count: number;
+}
+
+export interface SearchParams {
+  limit?: number;
+  offset?: number;
+  provider?: string;
+  tier?: string;
+  model?: string;
+  from?: number;
+  to?: number;
+  search?: string;
+  failures_only?: boolean;
 }
 
 export interface RoutingResult {

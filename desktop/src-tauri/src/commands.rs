@@ -2,9 +2,19 @@ use serde_json::Value;
 
 const PROXY_BASE: &str = "http://127.0.0.1:8402";
 
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default()
+}
+
 async fn proxy_get(path: &str) -> Result<Value, String> {
     let url = format!("{}{}", PROXY_BASE, path);
-    let resp = reqwest::get(&url)
+    let resp = client()
+        .get(&url)
+        .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
     resp.json::<Value>()
@@ -14,8 +24,7 @@ async fn proxy_get(path: &str) -> Result<Value, String> {
 
 async fn proxy_post(path: &str, body: Value) -> Result<Value, String> {
     let url = format!("{}{}", PROXY_BASE, path);
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = client()
         .post(&url)
         .json(&body)
         .send()
@@ -76,4 +85,19 @@ pub async fn get_timeline(limit: Option<u32>, offset: Option<u32>) -> Result<Val
 pub async fn get_costs(days: Option<u32>) -> Result<Value, String> {
     let days = days.unwrap_or(30);
     proxy_get(&format!("/api/v1/stats/costs?days={}", days)).await
+}
+
+#[tauri::command]
+pub async fn get_harnesses() -> Result<Value, String> {
+    proxy_get("/api/v1/harnesses").await
+}
+
+#[tauri::command]
+pub async fn configure_harness(id: String) -> Result<Value, String> {
+    proxy_post(&format!("/api/v1/harnesses/{}/configure", id), serde_json::json!({})).await
+}
+
+#[tauri::command]
+pub async fn restore_harness(id: String) -> Result<Value, String> {
+    proxy_post(&format!("/api/v1/harnesses/{}/restore", id), serde_json::json!({})).await
 }

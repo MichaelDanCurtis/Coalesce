@@ -28,6 +28,8 @@ export default function CostAnalytics() {
   const byProvider = costs?.by_provider ?? [];
   const byModel = costs?.by_model ?? [];
   const daily = costs?.daily ?? [];
+
+  const exportCostsUrl = api.exportCostsCsvUrl(30);
   const budget = costs?.budget ?? {};
 
   const budgetPct = budget.total_limit_usd > 0
@@ -45,7 +47,17 @@ export default function CostAnalytics() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold">Cost Analytics</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Cost Analytics</h2>
+        <a
+          href={exportCostsUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="btn-ghost text-xs"
+        >
+          Export CSV
+        </a>
+      </div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

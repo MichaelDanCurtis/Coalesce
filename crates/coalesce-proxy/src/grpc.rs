@@ -166,6 +166,7 @@ impl CoalesceService for GrpcHandler {
                     // Log request
                     let _ = self.state.storage.log_request(
                         &coalesce_core::storage::RequestLogEntry {
+                            id: None, timestamp: None,
                             tier: scoring.tier.to_string(),
                             score: scoring.score,
                             provider: selected.provider.clone(),
@@ -258,6 +259,7 @@ impl CoalesceService for GrpcHandler {
                     // Log failure
                     let _ = self.state.storage.log_request(
                         &coalesce_core::storage::RequestLogEntry {
+                            id: None, timestamp: None,
                             tier: scoring.tier.to_string(),
                             score: scoring.score,
                             provider: selected.provider.clone(),

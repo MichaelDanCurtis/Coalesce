@@ -1,4 +1,4 @@
-import type { Stats, QuotaInfo, RequestEntry, RoutingResult, RoutingProfile } from "../types";
+import type { Stats, QuotaInfo, RequestEntry, RoutingResult, RoutingProfile, ConfigProfile, SearchParams } from "../types";
 
 // Detect if running inside Tauri
 const isTauri = () => typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -140,6 +140,29 @@ export const api = {
     return httpPost(`/api/v1/providers/${name}/test`, {});
   },
 
+  async refreshProvider(name: string) {
+    return httpPost<{ ok: boolean; models?: number; message?: string; error?: string }>(
+      `/api/v1/providers/${name}/refresh`, {}
+    );
+  },
+
+  async parseDocument(data: string, filename: string): Promise<{ text: string; filename: string }> {
+    return httpPost("/api/v1/parse", { data, filename });
+  },
+
+  async toggleProvider(name: string, enabled: boolean) {
+    return httpPost<{ status: string; provider: string; enabled: boolean }>(
+      `/api/v1/providers/${name}/toggle`, { enabled }
+    );
+  },
+
+  async toggleModel(provider: string, model: string, enabled: boolean) {
+    const safeModel = model.replace(/:/g, "---");
+    return httpPost<{ status: string; provider: string; model: string; enabled: boolean }>(
+      `/api/v1/providers/${provider}/models/${safeModel}/toggle`, { enabled }
+    );
+  },
+
   async copilotAuthStart() {
     return httpPost<{ user_code: string; verification_uri: string; device_code: string; interval: number }>("/api/v1/auth/copilot/start", {});
   },
@@ -259,6 +282,146 @@ export const api = {
   async googleAuthPoll(device_code: string) {
     return httpPost<{ status: string; models?: number; error?: string }>(
       "/api/v1/auth/google/poll", { device_code }
+    );
+  },
+
+  // --- Profiles ---
+  async getConfigProfiles() {
+    return httpGet<{ profiles: ConfigProfile[]; active: string | null }>("/api/v1/profiles");
+  },
+
+  async getConfigProfile(name: string) {
+    return httpGet<{ status: string; profile?: any; error?: string }>(`/api/v1/profiles/${encodeURIComponent(name)}`);
+  },
+
+  async saveProfile(name: string, description?: string) {
+    return httpPost<{ status: string; name?: string; error?: string }>("/api/v1/profiles", { name, description });
+  },
+
+  async updateProfile(name: string, data: { name?: string; description?: string }) {
+    const resp = await fetch(`${PROXY_BASE}/api/v1/profiles/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+
+  async deleteProfile(name: string) {
+    const resp = await fetch(`${PROXY_BASE}/api/v1/profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+
+  async activateProfile(name: string) {
+    return httpPost<{ status: string; providers_applied?: number; message?: string; error?: string }>(
+      `/api/v1/profiles/${encodeURIComponent(name)}/activate`, {}
+    );
+  },
+
+  async importProfile(profile: any) {
+    return httpPost<{ status: string; name?: string; error?: string }>("/api/v1/profiles/import", profile);
+  },
+
+  async exportProfile(name: string) {
+    return httpGet<{ status: string; profile?: any; error?: string }>(`/api/v1/profiles/${encodeURIComponent(name)}`);
+  },
+
+  // --- Search & Export ---
+  async searchRequests(params: SearchParams) {
+    const qs = new URLSearchParams();
+    if (params.limit) qs.set("limit", String(params.limit));
+    if (params.offset) qs.set("offset", String(params.offset));
+    if (params.provider) qs.set("provider", params.provider);
+    if (params.tier) qs.set("tier", params.tier);
+    if (params.model) qs.set("model", params.model);
+    if (params.from) qs.set("from", String(params.from));
+    if (params.to) qs.set("to", String(params.to));
+    if (params.search) qs.set("search", params.search);
+    if (params.failures_only) qs.set("failures_only", "true");
+    return httpGet<{ entries: RequestEntry[]; total: number; limit: number; offset: number; count: number }>(
+      `/api/v1/stats/search?${qs.toString()}`
+    );
+  },
+
+  exportJsonUrl(params?: SearchParams) {
+    const qs = new URLSearchParams();
+    if (params?.provider) qs.set("provider", params.provider);
+    if (params?.tier) qs.set("tier", params.tier);
+    if (params?.model) qs.set("model", params.model);
+    if (params?.from) qs.set("from", String(params.from));
+    if (params?.to) qs.set("to", String(params.to));
+    if (params?.search) qs.set("search", params.search);
+    if (params?.failures_only) qs.set("failures_only", "true");
+    return `${PROXY_BASE}/api/v1/stats/export/json?${qs.toString()}`;
+  },
+
+  exportCsvUrl(params?: SearchParams) {
+    const qs = new URLSearchParams();
+    if (params?.provider) qs.set("provider", params.provider);
+    if (params?.tier) qs.set("tier", params.tier);
+    if (params?.model) qs.set("model", params.model);
+    if (params?.from) qs.set("from", String(params.from));
+    if (params?.to) qs.set("to", String(params.to));
+    if (params?.search) qs.set("search", params.search);
+    if (params?.failures_only) qs.set("failures_only", "true");
+    return `${PROXY_BASE}/api/v1/stats/export/csv?${qs.toString()}`;
+  },
+
+  exportCostsCsvUrl(days?: number) {
+    return `${PROXY_BASE}/api/v1/stats/export/costs/csv?days=${days ?? 30}`;
+  },
+
+  // --- Quality Feedback ---
+  async submitFeedback(provider: string, model: string, rating: number) {
+    return httpPost<{ status: string; current_score: number }>("/api/v1/feedback", { provider, model, rating });
+  },
+
+  async getQualityScores() {
+    return httpGet<{ scores: Array<{ key: string; score: number; sample_count: number }> }>("/api/v1/quality/scores");
+  },
+
+  // --- Failover Rules ---
+  async getRules() {
+    return httpGet<{ rules: Array<any> }>("/api/v1/rules");
+  },
+  async createRule(rule: any) {
+    return httpPost<{ status: string }>("/api/v1/rules", rule);
+  },
+  async getRulePresets() {
+    return httpGet<{ presets: Array<any> }>("/api/v1/rules/presets");
+  },
+  async deleteRule(id: string) {
+    const resp = await fetch(`${PROXY_BASE}/api/v1/rules/${id}`, { method: "DELETE" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
+  async toggleRule(id: string) {
+    return httpPost<{ status: string; enabled: boolean }>(`/api/v1/rules/${id}/toggle`, {});
+  },
+
+  // --- Harnesses ---
+  async getHarnesses() {
+    if (isTauri()) return tauriInvoke("get_harnesses");
+    return httpGet<{ harnesses: Array<{
+      id: string; name: string; icon: string; installed: boolean;
+      configured: boolean; config_path: string | null;
+      backup_exists: boolean; description: string;
+    }> }>("/api/v1/harnesses");
+  },
+
+  async configureHarness(id: string) {
+    if (isTauri()) return tauriInvoke("configure_harness", { id });
+    return httpPost<{ success: boolean; message: string; harness_id: string }>(
+      `/api/v1/harnesses/${id}/configure`, {}
+    );
+  },
+
+  async restoreHarness(id: string) {
+    if (isTauri()) return tauriInvoke("restore_harness", { id });
+    return httpPost<{ success: boolean; message: string; harness_id: string }>(
+      `/api/v1/harnesses/${id}/restore`, {}
     );
   },
 };

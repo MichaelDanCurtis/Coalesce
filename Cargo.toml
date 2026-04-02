@@ -61,6 +61,9 @@ futures = "0.3"
 bytes = "1"
 dirs = "6"
 async-trait = "0.1"
+pdf_oxide = { version = "0.3", features = ["parallel"] }
+tempfile = "3"
+base64 = "0.22"
 
 # gRPC
 tonic = "0.12"

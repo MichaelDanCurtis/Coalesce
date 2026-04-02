@@ -45,6 +45,9 @@ fn main() {
             commands::get_profiles,
             commands::get_timeline,
             commands::get_costs,
+            commands::get_harnesses,
+            commands::configure_harness,
+            commands::restore_harness,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

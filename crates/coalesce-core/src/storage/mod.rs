@@ -72,6 +72,16 @@ impl Storage {
 
             CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_request_log_provider ON request_log(provider);
+
+            CREATE TABLE IF NOT EXISTS profiles (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL UNIQUE,
+                description TEXT,
+                config_json TEXT NOT NULL,
+                created_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                updated_at  INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                is_active   INTEGER NOT NULL DEFAULT 0
+            );
             ",
         )?;
         Ok(())
@@ -207,21 +217,23 @@ impl Storage {
     pub fn recent_requests(&self, limit: u32) -> crate::error::Result<Vec<RequestLogEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT tier, score, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, success
+            "SELECT id, timestamp, tier, score, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, success
              FROM request_log ORDER BY id DESC LIMIT ?1",
         )?;
         let entries = stmt
             .query_map(params![limit], |row| {
                 Ok(RequestLogEntry {
-                    tier: row.get(0)?,
-                    score: row.get(1)?,
-                    provider: row.get(2)?,
-                    model: row.get(3)?,
-                    input_tokens: row.get(4)?,
-                    output_tokens: row.get(5)?,
-                    cost_usd: row.get(6)?,
-                    latency_ms: row.get(7)?,
-                    success: row.get::<_, i32>(8)? != 0,
+                    id: Some(row.get(0)?),
+                    timestamp: Some(row.get(1)?),
+                    tier: row.get(2)?,
+                    score: row.get(3)?,
+                    provider: row.get(4)?,
+                    model: row.get(5)?,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    cost_usd: row.get(8)?,
+                    latency_ms: row.get(9)?,
+                    success: row.get::<_, i32>(10)? != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -319,7 +331,7 @@ impl Storage {
         Ok(entries)
     }
 
-    /// Filtered request query with optional provider, tier, and failures_only
+    /// Filtered request query with optional provider, tier, model, date range, and failures_only
     pub fn filtered_requests(
         &self,
         limit: u32,
@@ -327,9 +339,25 @@ impl Storage {
         tier: Option<&str>,
         failures_only: bool,
     ) -> crate::error::Result<Vec<RequestLogEntry>> {
+        self.search_requests(limit, 0, provider, tier, None, None, None, None, failures_only)
+    }
+
+    /// Advanced search with full filtering, pagination, model search, and date range
+    pub fn search_requests(
+        &self,
+        limit: u32,
+        offset: u32,
+        provider: Option<&str>,
+        tier: Option<&str>,
+        model: Option<&str>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+        search: Option<&str>,
+        failures_only: bool,
+    ) -> crate::error::Result<Vec<RequestLogEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut sql = String::from(
-            "SELECT tier, score, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, success
+            "SELECT id, timestamp, tier, score, provider, model, input_tokens, output_tokens, cost_usd, latency_ms, success
              FROM request_log WHERE 1=1"
         );
         let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -342,30 +370,104 @@ impl Storage {
             sql.push_str(" AND tier = ?");
             params_vec.push(Box::new(t.to_string()));
         }
+        if let Some(m) = model {
+            sql.push_str(" AND model LIKE ?");
+            params_vec.push(Box::new(format!("%{}%", m)));
+        }
+        if let Some(from) = from_ts {
+            sql.push_str(" AND timestamp >= ?");
+            params_vec.push(Box::new(from));
+        }
+        if let Some(to) = to_ts {
+            sql.push_str(" AND timestamp <= ?");
+            params_vec.push(Box::new(to));
+        }
+        if let Some(q) = search {
+            sql.push_str(" AND (model LIKE ? OR provider LIKE ? OR tier LIKE ?)");
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
         if failures_only {
             sql.push_str(" AND success = 0");
         }
-        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        sql.push_str(" ORDER BY id DESC LIMIT ? OFFSET ?");
         params_vec.push(Box::new(limit));
+        params_vec.push(Box::new(offset));
 
         let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let entries = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(RequestLogEntry {
-                    tier: row.get(0)?,
-                    score: row.get(1)?,
-                    provider: row.get(2)?,
-                    model: row.get(3)?,
-                    input_tokens: row.get(4)?,
-                    output_tokens: row.get(5)?,
-                    cost_usd: row.get(6)?,
-                    latency_ms: row.get(7)?,
-                    success: row.get::<_, i32>(8)? != 0,
+                    id: Some(row.get(0)?),
+                    timestamp: Some(row.get(1)?),
+                    tier: row.get(2)?,
+                    score: row.get(3)?,
+                    provider: row.get(4)?,
+                    model: row.get(5)?,
+                    input_tokens: row.get(6)?,
+                    output_tokens: row.get(7)?,
+                    cost_usd: row.get(8)?,
+                    latency_ms: row.get(9)?,
+                    success: row.get::<_, i32>(10)? != 0,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(entries)
+    }
+
+    /// Count total matching requests (for pagination metadata)
+    pub fn count_requests(
+        &self,
+        provider: Option<&str>,
+        tier: Option<&str>,
+        model: Option<&str>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+        search: Option<&str>,
+        failures_only: bool,
+    ) -> crate::error::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from("SELECT COUNT(*) FROM request_log WHERE 1=1");
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(p) = provider {
+            sql.push_str(" AND provider = ?");
+            params_vec.push(Box::new(p.to_string()));
+        }
+        if let Some(t) = tier {
+            sql.push_str(" AND tier = ?");
+            params_vec.push(Box::new(t.to_string()));
+        }
+        if let Some(m) = model {
+            sql.push_str(" AND model LIKE ?");
+            params_vec.push(Box::new(format!("%{}%", m)));
+        }
+        if let Some(from) = from_ts {
+            sql.push_str(" AND timestamp >= ?");
+            params_vec.push(Box::new(from));
+        }
+        if let Some(to) = to_ts {
+            sql.push_str(" AND timestamp <= ?");
+            params_vec.push(Box::new(to));
+        }
+        if let Some(q) = search {
+            sql.push_str(" AND (model LIKE ? OR provider LIKE ? OR tier LIKE ?)");
+            let pattern = format!("%{}%", q);
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern.clone()));
+            params_vec.push(Box::new(pattern));
+        }
+        if failures_only {
+            sql.push_str(" AND success = 0");
+        }
+
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let count: u64 = stmt.query_row(params_refs.as_slice(), |row| row.get(0))?;
+        Ok(count)
     }
 
     /// Get aggregate stats for dashboard
@@ -392,6 +494,120 @@ impl Storage {
             })
         })?;
         Ok(stats)
+    }
+
+    // --- Configuration Profiles ---
+
+    /// Save or update a profile. If a profile with the same name exists, it's replaced.
+    pub fn save_profile(&self, name: &str, description: Option<&str>, config_json: &str) -> crate::error::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO profiles (name, description, config_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, strftime('%s', 'now'), strftime('%s', 'now'))
+             ON CONFLICT(name) DO UPDATE SET
+                description = excluded.description,
+                config_json = excluded.config_json,
+                updated_at = strftime('%s', 'now')",
+            params![name, description, config_json],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// List all profiles (without full config_json for efficiency)
+    pub fn list_profiles(&self) -> crate::error::Result<Vec<ProfileSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, created_at, updated_at, is_active FROM profiles ORDER BY name"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProfileSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                is_active: row.get::<_, i32>(5)? != 0,
+            })
+        })?;
+        let mut result = Vec::new();
+        for r in rows {
+            result.push(r?);
+        }
+        Ok(result)
+    }
+
+    /// Get a profile's full config by name
+    pub fn get_profile(&self, name: &str) -> crate::error::Result<Option<ProfileRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, description, config_json, created_at, updated_at, is_active
+             FROM profiles WHERE name = ?1"
+        )?;
+        let result = stmt.query_row(params![name], |row| {
+            Ok(ProfileRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                config_json: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                is_active: row.get::<_, i32>(6)? != 0,
+            })
+        }).ok();
+        Ok(result)
+    }
+
+    /// Update profile metadata (name and/or description)
+    pub fn update_profile_meta(&self, old_name: &str, new_name: Option<&str>, description: Option<&str>) -> crate::error::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut sql = String::from("UPDATE profiles SET updated_at = strftime('%s', 'now')");
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(n) = new_name {
+            sql.push_str(", name = ?");
+            params_vec.push(Box::new(n.to_string()));
+        }
+        if let Some(d) = description {
+            sql.push_str(", description = ?");
+            params_vec.push(Box::new(d.to_string()));
+        }
+        sql.push_str(" WHERE name = ?");
+        params_vec.push(Box::new(old_name.to_string()));
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let affected = conn.execute(&sql, params_refs.as_slice())?;
+        Ok(affected > 0)
+    }
+
+    /// Delete a profile by name
+    pub fn delete_profile(&self, name: &str) -> crate::error::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute("DELETE FROM profiles WHERE name = ?1", params![name])?;
+        Ok(affected > 0)
+    }
+
+    /// Set a profile as active (deactivates all others)
+    pub fn set_active_profile(&self, name: &str) -> crate::error::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE profiles SET is_active = 0 WHERE is_active = 1", [])?;
+        let affected = conn.execute(
+            "UPDATE profiles SET is_active = 1 WHERE name = ?1",
+            params![name],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Clear the active profile
+    pub fn clear_active_profile(&self) -> crate::error::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE profiles SET is_active = 0 WHERE is_active = 1", [])?;
+        Ok(())
+    }
+
+    /// Get the currently active profile name
+    pub fn get_active_profile_name(&self) -> crate::error::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT name FROM profiles WHERE is_active = 1 LIMIT 1")?;
+        let result = stmt.query_row([], |row| row.get(0)).ok();
+        Ok(result)
     }
 
     /// Get aggregate stats grouped by provider
@@ -439,8 +655,12 @@ pub struct ProviderStats {
     pub avg_latency_ms: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RequestLogEntry {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
     pub tier: String,
     pub score: f64,
     pub provider: String,
@@ -450,6 +670,18 @@ pub struct RequestLogEntry {
     pub cost_usd: Option<f64>,
     pub latency_ms: Option<u64>,
     pub success: bool,
+}
+
+impl RequestLogEntry {
+    /// Create a new entry for logging (id/timestamp auto-generated by DB)
+    pub fn new(tier: String, score: f64, provider: String, model: String) -> Self {
+        Self {
+            id: None, timestamp: None,
+            tier, score, provider, model,
+            input_tokens: None, output_tokens: None, cost_usd: None, latency_ms: None,
+            success: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -471,6 +703,27 @@ pub struct DailyCost {
     pub output_tokens: u64,
     pub total_cost_usd: f64,
     pub free_requests: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProfileSummary {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileRow {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub config_json: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -538,6 +791,7 @@ mod tests {
 
         storage
             .log_request(&RequestLogEntry {
+                id: None, timestamp: None,
                 tier: "SIMPLE".into(),
                 score: 0.05,
                 provider: "ollama".into(),
@@ -552,6 +806,7 @@ mod tests {
 
         storage
             .log_request(&RequestLogEntry {
+                id: None, timestamp: None,
                 tier: "COMPLEX".into(),
                 score: 0.45,
                 provider: "openrouter".into(),
@@ -574,5 +829,59 @@ mod tests {
         assert_eq!(stats.total_requests, 2);
         assert_eq!(stats.successful_requests, 2);
         assert!((stats.total_cost_usd - 0.0045).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_profiles_crud() {
+        let storage = Storage::in_memory().unwrap();
+        let config = r#"{"providers":{"copilot":{"key":"test"}},"priorities":{}}"#;
+
+        // Create
+        storage.save_profile("dev", Some("Development setup"), config).unwrap();
+        storage.save_profile("prod", None, config).unwrap();
+
+        // List
+        let profiles = storage.list_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+
+        // Get
+        let p = storage.get_profile("dev").unwrap().unwrap();
+        assert_eq!(p.name, "dev");
+        assert_eq!(p.description, Some("Development setup".to_string()));
+        assert_eq!(p.config_json, config);
+        assert!(!p.is_active);
+
+        // Update metadata
+        assert!(storage.update_profile_meta("dev", Some("development"), Some("Updated")).unwrap());
+        let p = storage.get_profile("development").unwrap().unwrap();
+        assert_eq!(p.description, Some("Updated".to_string()));
+        assert!(storage.get_profile("dev").unwrap().is_none());
+
+        // Active profile
+        assert!(storage.get_active_profile_name().unwrap().is_none());
+        assert!(storage.set_active_profile("prod").unwrap());
+        assert_eq!(storage.get_active_profile_name().unwrap(), Some("prod".to_string()));
+
+        // Setting another active clears the first
+        assert!(storage.set_active_profile("development").unwrap());
+        assert_eq!(storage.get_active_profile_name().unwrap(), Some("development".to_string()));
+        let profiles = storage.list_profiles().unwrap();
+        let active_count = profiles.iter().filter(|p| p.is_active).count();
+        assert_eq!(active_count, 1);
+
+        // Clear active
+        storage.clear_active_profile().unwrap();
+        assert!(storage.get_active_profile_name().unwrap().is_none());
+
+        // Delete
+        assert!(storage.delete_profile("prod").unwrap());
+        assert!(!storage.delete_profile("nonexistent").unwrap());
+        assert_eq!(storage.list_profiles().unwrap().len(), 1);
+
+        // Upsert (save_profile with same name updates)
+        storage.save_profile("development", Some("v2"), r#"{"new":true}"#).unwrap();
+        let p = storage.get_profile("development").unwrap().unwrap();
+        assert_eq!(p.description, Some("v2".to_string()));
+        assert!(p.config_json.contains("new"));
     }
 }

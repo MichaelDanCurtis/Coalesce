@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import RoutingViz, { RoutingPath } from "./RoutingViz";
+import { api } from "../api/client";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -14,12 +15,16 @@ interface ChatMessage {
   timestamp: number;
   routing?: RoutingPath;
   attachments?: Attachment[];
+  rated?: "up" | "down";
 }
 
 interface Attachment {
   name: string;
   type: string;
   dataUrl: string; // base64 data URL
+  extractedText?: string; // parsed document text (not shown in UI)
+  parsing?: boolean; // true while backend is extracting
+  error?: string; // extraction error message
 }
 
 interface Conversation {
@@ -307,25 +312,53 @@ export default function Chat() {
 
   // ─── File upload ─────────────────────────────────────────
 
+  const TEXT_EXTS = [".txt", ".md", ".json", ".csv"];
+  const PARSE_EXTS = [".pdf", ".docx"];
+
   const handleFileUpload = useCallback(
     (files: FileList | null) => {
       if (!files) return;
       Array.from(files).forEach((file) => {
         const reader = new FileReader();
-        reader.onload = () => {
-          setAttachments((prev) => [
-            ...prev,
-            {
-              name: file.name,
-              type: file.type,
-              dataUrl: reader.result as string,
-            },
-          ]);
+        reader.onload = async () => {
+          const dataUrl = reader.result as string;
+          const ext = "." + file.name.split(".").pop()?.toLowerCase();
+
+          if (file.type.startsWith("image/")) {
+            // Images: keep as-is
+            setAttachments((prev) => [...prev, { name: file.name, type: file.type, dataUrl }]);
+          } else if (TEXT_EXTS.includes(ext)) {
+            // Text files: decode client-side
+            const b64 = dataUrl.split(",")[1] || "";
+            const text = atob(b64);
+            setAttachments((prev) => [...prev, { name: file.name, type: file.type, dataUrl, extractedText: text }]);
+          } else if (PARSE_EXTS.includes(ext)) {
+            // PDFs: send to backend for extraction
+            setAttachments((prev) => [...prev, { name: file.name, type: file.type, dataUrl, parsing: true }]);
+            try {
+              const resp = await fetch(`http://127.0.0.1:8402/api/v1/parse`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ data: dataUrl, filename: file.name }),
+              });
+              const result = await resp.json();
+              if (result.error) {
+                setAttachments((prev) => prev.map((a) => a.name === file.name && a.parsing ? { ...a, parsing: false, error: result.error } : a));
+              } else {
+                setAttachments((prev) => prev.map((a) => a.name === file.name && a.parsing ? { ...a, parsing: false, extractedText: result.text } : a));
+              }
+            } catch (e) {
+              setAttachments((prev) => prev.map((a) => a.name === file.name && a.parsing ? { ...a, parsing: false, error: "Parse failed" } : a));
+            }
+          } else {
+            // Unsupported — add with error
+            setAttachments((prev) => [...prev, { name: file.name, type: file.type, dataUrl, error: "Unsupported format" }]);
+          }
         };
         reader.readAsDataURL(file);
       });
     },
-    []
+    [attachments.length]
   );
 
   const handlePaste = useCallback(
@@ -362,6 +395,7 @@ export default function Chat() {
       const content = overrideContent || input.trim();
       if (!content && attachments.length === 0) return;
       if (streaming) return;
+      if (attachments.some(a => a.parsing)) return;
 
       let convId = activeId;
       let conv = active;
@@ -432,18 +466,32 @@ export default function Chat() {
           if (m.role === "assistant" && m.content === "") continue;
           if (m.role === "system") continue;
 
-          if (m.attachments?.some((a) => a.type.startsWith("image/"))) {
-            // Vision message with images
-            const contentParts: any[] = [{ type: "text", text: m.content }];
+          if (m.attachments && m.attachments.length > 0) {
+            const hasImages = m.attachments.some((a) => a.type.startsWith("image/"));
+            // Build document text from extracted attachments
+            const docTexts: string[] = [];
             for (const att of m.attachments) {
-              if (att.type.startsWith("image/")) {
-                contentParts.push({
-                  type: "image_url",
-                  image_url: { url: att.dataUrl },
-                });
+              if (!att.type.startsWith("image/") && att.extractedText) {
+                docTexts.push(`\`\`\`${att.name}\n${att.extractedText}\n\`\`\``);
               }
             }
-            apiMessages.push({ role: m.role, content: contentParts });
+            const fullText = docTexts.length > 0
+              ? `${m.content}\n\n${docTexts.join("\n\n")}`
+              : m.content;
+
+            if (hasImages) {
+              // Vision message — send as Parts array to trigger vision routing
+              const contentParts: any[] = [{ type: "text", text: fullText }];
+              for (const att of m.attachments) {
+                if (att.type.startsWith("image/")) {
+                  contentParts.push({ type: "image_url", image_url: { url: att.dataUrl } });
+                }
+              }
+              apiMessages.push({ role: m.role, content: contentParts });
+            } else {
+              // Document-only — send as plain text (routes to any model)
+              apiMessages.push({ role: m.role, content: fullText });
+            }
           } else {
             apiMessages.push({ role: m.role, content: m.content });
           }
@@ -462,22 +510,49 @@ export default function Chat() {
           signal: controller.signal,
         });
 
-        // Extract routing headers
-        const routingProvider = response.headers.get("x-coalesce-provider") || "";
-        const routingModel = response.headers.get("x-coalesce-model") || "";
-        const routingTier = response.headers.get("x-coalesce-tier") || "";
-        const routingAttempt = parseInt(response.headers.get("x-coalesce-attempt") || "1");
+        // Extract routing headers (may be empty due to CORS; overridden by SSE metadata)
+        let routingProvider = response.headers.get("x-coalesce-provider") || "";
+        let routingModel = response.headers.get("x-coalesce-model") || "";
+        let routingTier = response.headers.get("x-coalesce-tier") || "";
+        let routingAttempt = parseInt(response.headers.get("x-coalesce-attempt") || "1");
 
         if (!response.ok) {
           const err = await response.text();
+          const latencyMs = Date.now() - startTime;
+
+          // Try to extract provider from error message (e.g. "Provider error: openrouter - ...")
+          let errorProvider = routingProvider || "unknown";
+          let errorAttempt = routingAttempt;
+          try {
+            const errJson = JSON.parse(err);
+            const msg = errJson?.error?.message || "";
+            const provMatch = msg.match(/Provider error:\s*(\S+)\s*-/);
+            if (provMatch) errorProvider = provMatch[1];
+            const attemptMatch = msg.match(/after (\d+) attempts/);
+            if (attemptMatch) errorAttempt = parseInt(attemptMatch[1]);
+          } catch { /* not JSON */ }
+
+          const errorRouting: RoutingPath = {
+            tier: routingTier || "Unknown",
+            score: 0,
+            provider: errorProvider,
+            model: routingModel || conv?.model || "auto",
+            attempt: errorAttempt,
+            costUsd: 0,
+            latencyMs,
+            inputTokens: 0,
+            outputTokens: 0,
+            error: true,
+          };
           updateConversation(convId!, (c) => ({
             ...c,
             messages: c.messages.map((m) =>
               m.id === assistantMsg.id
-                ? { ...m, content: `Error: ${response.status} — ${err}` }
+                ? { ...m, content: `Error: ${response.status} — ${err}`, routing: errorRouting }
                 : m
             ),
           }));
+          setSelectedRouting(errorRouting);
           setStreaming(false);
           setAbortController(null);
           return;
@@ -509,10 +584,15 @@ export default function Chat() {
             try {
               const chunk = JSON.parse(data);
 
-              // Extract routing metadata from first chunk or x_coalesce
+              // Extract routing metadata from SSE metadata chunk
               if (chunk.x_coalesce) {
-                routingScore = chunk.x_coalesce.score || 0;
-                costUsd = chunk.x_coalesce.cost_usd || 0;
+                routingScore = chunk.x_coalesce.score || routingScore;
+                costUsd = chunk.x_coalesce.cost_usd || costUsd;
+                // Override header values with in-band data (more reliable than CORS headers)
+                if (chunk.x_coalesce.tier) routingTier = chunk.x_coalesce.tier;
+                if (chunk.x_coalesce.provider) routingProvider = chunk.x_coalesce.provider;
+                if (chunk.x_coalesce.model) routingModel = chunk.x_coalesce.model;
+                if (chunk.x_coalesce.attempt) routingAttempt = chunk.x_coalesce.attempt;
               }
 
               if (chunk.usage) {
@@ -831,15 +911,15 @@ export default function Chat() {
           {active?.messages.map((msg) => (
             <div
               key={msg.id}
-              className={`flex gap-3 ${
+              className={`group flex gap-3 ${
                 msg.role === "user" ? "justify-end" : "justify-start"
               }`}
             >
               <div
                 className={`max-w-[80%] rounded-xl px-4 py-3 ${
                   msg.role === "user"
-                    ? "bg-brand-600/20 text-primary"
-                    : "bg-surface-alt text-primary"
+                    ? "bg-brand-600/20 border border-brand-500/10 text-primary"
+                    : "bg-surface-alt border border-themed-faint text-primary"
                 }`}
               >
                 {/* Attachments */}
@@ -856,9 +936,10 @@ export default function Chat() {
                       ) : (
                         <div
                           key={i}
-                          className="text-xs px-2 py-1 rounded bg-surface border border-themed"
+                          className="inline-flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg bg-surface border border-themed text-secondary"
                         >
-                          📎 {att.name}
+                          <span>📄</span>
+                          <span className="font-medium text-primary">{att.name}</span>
                         </div>
                       )
                     )}
@@ -966,6 +1047,31 @@ export default function Chat() {
                         >
                           Retry
                         </button>
+                        {msg.routing && (
+                          <>
+                            <span className="text-secondary/30">|</span>
+                            <button
+                              onClick={() => {
+                                api.submitFeedback(msg.routing!.provider, msg.routing!.model, 1.0);
+                                setConversations((prev: Conversation[]) => prev.map((c: Conversation) => c.id === active?.id ? { ...c, messages: c.messages.map((m: ChatMessage) => m.id === msg.id ? { ...m, rated: "up" } : m) } : c));
+                              }}
+                              className={`text-[10px] transition-colors ${msg.rated === "up" ? "text-emerald-400" : "text-secondary hover:text-emerald-400"}`}
+                              title="Good response"
+                            >
+                              {msg.rated === "up" ? "\u{1F44D}" : "\u25B2"}
+                            </button>
+                            <button
+                              onClick={() => {
+                                api.submitFeedback(msg.routing!.provider, msg.routing!.model, 0.0);
+                                setConversations((prev: Conversation[]) => prev.map((c: Conversation) => c.id === active?.id ? { ...c, messages: c.messages.map((m: ChatMessage) => m.id === msg.id ? { ...m, rated: "down" } : m) } : c));
+                              }}
+                              className={`text-[10px] transition-colors ${msg.rated === "down" ? "text-red-400" : "text-secondary hover:text-red-400"}`}
+                              title="Poor response"
+                            >
+                              {msg.rated === "down" ? "\u{1F44E}" : "\u25BC"}
+                            </button>
+                          </>
+                        )}
                       </>
                     )}
                 </div>
@@ -988,18 +1094,18 @@ export default function Chat() {
             {attachments.map((att, i) => (
               <div
                 key={i}
-                className="flex items-center gap-1 text-xs px-2 py-1 rounded-md bg-surface-alt border border-themed"
+                className={`flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-themed ${att.error ? "bg-red-500/10 border-red-500/30" : "bg-surface-alt"}`}
               >
                 {att.type.startsWith("image/") ? (
-                  <img
-                    src={att.dataUrl}
-                    alt={att.name}
-                    className="w-8 h-8 rounded object-cover"
-                  />
+                  <img src={att.dataUrl} alt={att.name} className="w-8 h-8 rounded object-cover" />
+                ) : att.parsing ? (
+                  <span className="animate-spin">⏳</span>
+                ) : att.error ? (
+                  <span title={att.error}>❌</span>
                 ) : (
-                  <span>📎</span>
+                  <span>📄</span>
                 )}
-                <span className="max-w-[100px] truncate">{att.name}</span>
+                <span className="max-w-[120px] truncate">{att.name}</span>
                 <button
                   onClick={() => removeAttachment(i)}
                   className="text-secondary hover:text-red-400 ml-1"
@@ -1019,7 +1125,7 @@ export default function Chat() {
               ref={fileInputRef}
               className="hidden"
               multiple
-              accept="image/*,.txt,.pdf,.md,.json,.csv"
+              accept="image/*,.txt,.pdf,.docx,.md,.json,.csv,.html"
               onChange={(e) => handleFileUpload(e.target.files)}
             />
 
@@ -1060,7 +1166,7 @@ export default function Chat() {
             ) : (
               <button
                 onClick={() => sendMessage()}
-                disabled={!input.trim() && attachments.length === 0}
+                disabled={(!input.trim() && attachments.length === 0) || attachments.some(a => a.parsing)}
                 className="px-4 py-2 text-sm rounded-lg btn-primary disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Send

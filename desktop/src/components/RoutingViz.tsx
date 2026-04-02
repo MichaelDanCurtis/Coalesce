@@ -10,81 +10,51 @@ export interface RoutingPath {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  error?: boolean;
   candidates?: Array<{
     provider: string;
     model: string;
     marginalCost: number;
     selected: boolean;
-    skipped?: string; // reason skipped
+    skipped?: string;
   }>;
 }
 
 const TIER_COLORS: Record<string, string> = {
-  Simple: "#38bdf8",    // sky-400
-  Medium: "#fbbf24",    // amber-400
-  Complex: "#a78bfa",   // violet-400
-  Reasoning: "#f472b6", // pink-400
+  Simple: "#38bdf8", SIMPLE: "#38bdf8",
+  Medium: "#fbbf24", MEDIUM: "#fbbf24",
+  Complex: "#a78bfa", COMPLEX: "#a78bfa",
+  Reasoning: "#f472b6", REASONING: "#f472b6",
 };
 
-const NODE_WIDTH = 140;
-const NODE_HEIGHT = 44;
-const ARROW_LEN = 24;
+const NODE_WIDTH = 150;
+const NODE_HEIGHT = 48;
+const ARROW_LEN = 28;
 const TOP_PAD = 16;
 
 interface NodeDef {
   label: string;
-  sublabel?: string;
+  sublabel: string;
   color: string;
-  active: boolean;
 }
 
 export default function RoutingViz({ path }: { path: RoutingPath | null }) {
   const nodes = useMemo<NodeDef[]>(() => {
     if (!path) return [];
     const tierColor = TIER_COLORS[path.tier] || "#94a3b8";
+    const tierName = path.tier || "Unknown";
+    const providerName = path.provider || "unknown";
+    const modelName = path.model || "unknown";
+    const costLabel = path.costUsd > 0 ? `$${path.costUsd.toFixed(4)}` : "FREE";
+
     return [
-      {
-        label: "Request",
-        sublabel: path.inputTokens ? `${path.inputTokens} tokens` : undefined,
-        color: "#64748b",
-        active: true,
-      },
-      {
-        label: "Scorer",
-        sublabel: `score: ${path.score.toFixed(3)}`,
-        color: "#8b5cf6",
-        active: true,
-      },
-      {
-        label: path.tier,
-        sublabel: "tier",
-        color: tierColor,
-        active: true,
-      },
-      {
-        label: "Economics",
-        sublabel: path.costUsd > 0 ? `$${path.costUsd.toFixed(4)}` : "FREE",
-        color: "#10b981",
-        active: true,
-      },
-      {
-        label: path.provider,
-        sublabel: path.attempt > 1 ? `attempt ${path.attempt}` : undefined,
-        color: "#f59e0b",
-        active: true,
-      },
-      {
-        label: truncate(path.model, 16),
-        sublabel: path.latencyMs ? `${path.latencyMs}ms` : undefined,
-        color: tierColor,
-        active: true,
-      },
-      {
-        label: "Response",
-        sublabel: path.outputTokens ? `${path.outputTokens} tokens` : undefined,
-        color: "#22c55e",
-        active: true,
-      },
+      { label: "Request", sublabel: path.inputTokens ? `${path.inputTokens} tokens` : "incoming", color: "#64748b" },
+      { label: "Complexity", sublabel: `score ${path.score.toFixed(3)}`, color: "#8b5cf6" },
+      { label: "Tier", sublabel: tierName, color: tierColor },
+      { label: "Cost", sublabel: costLabel, color: "#10b981" },
+      { label: "Provider", sublabel: providerName, color: "#f59e0b" },
+      { label: "Model", sublabel: truncate(modelName, 20), color: tierColor },
+      { label: path.error ? "Failed" : "Response", sublabel: `${path.latencyMs}ms`, color: path.error ? "#ef4444" : "#22c55e" },
     ];
   }, [path]);
 
@@ -96,38 +66,19 @@ export default function RoutingViz({ path }: { path: RoutingPath | null }) {
     );
   }
 
-  const totalHeight =
-    TOP_PAD + nodes.length * (NODE_HEIGHT + ARROW_LEN) - ARROW_LEN + TOP_PAD;
-  const svgWidth = NODE_WIDTH + 32;
+  const totalHeight = TOP_PAD + nodes.length * (NODE_HEIGHT + ARROW_LEN) - ARROW_LEN + TOP_PAD;
+  const svgWidth = NODE_WIDTH + 40;
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
-      <h3 className="text-xs font-semibold text-secondary uppercase tracking-wider px-2 py-2">
+      <h3 className="text-xs font-semibold text-secondary uppercase tracking-wider px-3 py-3">
         Routing Path
       </h3>
-      <svg
-        width="100%"
-        viewBox={`0 0 ${svgWidth} ${totalHeight}`}
-        className="flex-1"
-      >
+      <svg width="100%" viewBox={`0 0 ${svgWidth} ${totalHeight}`} className="flex-1">
         <defs>
-          <marker
-            id="arrowhead"
-            markerWidth="8"
-            markerHeight="6"
-            refX="8"
-            refY="3"
-            orient="auto"
-          >
-            <polygon points="0 0, 8 3, 0 6" fill="#64748b" />
+          <marker id="arrowhead" markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto">
+            <polygon points="0 0, 7 2.5, 0 5" fill="#475569" />
           </marker>
-          <filter id="glow">
-            <feGaussianBlur stdDeviation="2" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
         </defs>
 
         {nodes.map((node, i) => {
@@ -137,78 +88,31 @@ export default function RoutingViz({ path }: { path: RoutingPath | null }) {
 
           return (
             <g key={i}>
-              {/* Connecting arrow */}
               {i > 0 && (
-                <line
-                  x1={cx}
-                  y1={y - ARROW_LEN + 2}
-                  x2={cx}
-                  y2={y - 2}
-                  stroke="#64748b"
-                  strokeWidth={1.5}
-                  markerEnd="url(#arrowhead)"
-                  opacity={0.6}
-                />
+                <line x1={cx} y1={y - ARROW_LEN + 4} x2={cx} y2={y - 3}
+                  stroke="#475569" strokeWidth={1.5} markerEnd="url(#arrowhead)" />
               )}
-
-              {/* Node rectangle */}
-              <rect
-                x={x}
-                y={y}
-                width={NODE_WIDTH}
-                height={NODE_HEIGHT}
-                rx={8}
-                fill={node.active ? node.color + "18" : "#1e293b"}
-                stroke={node.active ? node.color : "#475569"}
-                strokeWidth={node.active ? 1.5 : 1}
-                filter={node.active ? "url(#glow)" : undefined}
-              />
-
-              {/* Accent bar left — inset to avoid clipping rounded corners */}
-              <rect
-                x={x + 4}
-                y={y + 4}
-                width={3}
-                height={NODE_HEIGHT - 8}
-                rx={1.5}
-                fill={node.color}
-                opacity={node.active ? 0.8 : 0.3}
-              />
-
-              {/* Label */}
-              <text
-                x={x + 12}
-                y={y + (node.sublabel ? 17 : 22)}
-                fill={node.active ? node.color : "#94a3b8"}
-                fontSize={12}
-                fontWeight={600}
-                fontFamily="system-ui, sans-serif"
-              >
+              <rect x={x} y={y} width={NODE_WIDTH} height={NODE_HEIGHT}
+                rx={10} fill={`${node.color}12`} stroke={node.color} strokeWidth={1.5} />
+              {/* Step label (small, top) */}
+              <text x={cx} y={y + 18} fill={node.color} fontSize={11} fontWeight={600}
+                fontFamily="system-ui, -apple-system, sans-serif" textAnchor="middle">
                 {node.label}
               </text>
-
-              {/* Sublabel */}
-              {node.sublabel && (
-                <text
-                  x={x + 12}
-                  y={y + 33}
-                  fill="#94a3b8"
-                  fontSize={10}
-                  fontFamily="system-ui, sans-serif"
-                >
-                  {node.sublabel}
-                </text>
-              )}
+              {/* Decision value (larger, bottom) */}
+              <text x={cx} y={y + 35} fill="#cbd5e1" fontSize={12} fontWeight={500}
+                fontFamily="system-ui, -apple-system, sans-serif" textAnchor="middle">
+                {node.sublabel}
+              </text>
             </g>
           );
         })}
       </svg>
 
-      {/* Cost summary */}
-      <div className="px-2 py-2 border-t border-themed text-xs space-y-1">
+      <div className="px-3 py-3 border-t border-themed text-xs space-y-1.5">
         <div className="flex justify-between">
           <span className="text-secondary">Cost</span>
-          <span className={path.costUsd === 0 ? "text-emerald-400" : "text-primary"}>
+          <span className={path.costUsd === 0 ? "text-emerald-400 font-medium" : "text-primary"}>
             {path.costUsd > 0 ? `$${path.costUsd.toFixed(4)}` : "FREE"}
           </span>
         </div>

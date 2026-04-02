@@ -14,6 +14,7 @@ import Settings from "./components/Settings";
 import Chat from "./components/Chat";
 import { useTheme } from "./hooks/useTheme";
 import { I18nProvider } from "./i18n";
+import { NotificationProvider } from "./components/Notifications";
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
@@ -50,15 +51,17 @@ function App() {
 
   return (
     <I18nProvider>
-      <Layout
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        themeMode={theme.mode}
-        themeName={theme.theme}
-        onThemeModeChange={theme.setMode}
-      >
-        {renderTab()}
-      </Layout>
+      <NotificationProvider>
+        <Layout
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          themeMode={theme.mode}
+          themeName={theme.theme}
+          onThemeModeChange={theme.setMode}
+        >
+          {renderTab()}
+        </Layout>
+      </NotificationProvider>
     </I18nProvider>
   );
 }
