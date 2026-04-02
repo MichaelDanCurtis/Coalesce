@@ -1,0 +1,42 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node
+node_modules/
+dist/
+
+# Tauri
+desktop/src-tauri/target/
+desktop/dist/
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+*.dylib
+*.so
+*.dll
+
+# Planning/local
+.planning/
+clawrouter-reference/

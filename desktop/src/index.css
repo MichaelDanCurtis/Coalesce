@@ -1,0 +1,267 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ========== Theme: Sky (default) ========== */
+:root,
+[data-theme="default"] {
+  --brand-50: #f0f9ff;
+  --brand-100: #e0f2fe;
+  --brand-200: #bae6fd;
+  --brand-300: #7dd3fc;
+  --brand-400: #38bdf8;
+  --brand-500: #0ea5e9;
+  --brand-600: #0284c7;
+  --brand-700: #0369a1;
+  --brand-800: #075985;
+  --brand-900: #0c4a6e;
+  --brand-950: #082f49;
+}
+.dark[data-theme="default"] {
+  --surface: #0c1222;
+  --surface-alt: #131c30;
+  --surface-card: #162036;
+  --tertiary: #1e2d47;
+  --hover: #1e2d47;
+  --text-primary: #e2e8f0;
+  --text-secondary: #7b8ca6;
+  --border: #1e2d47;
+  --border-faint: rgba(30, 45, 71, 0.5);
+}
+.light[data-theme="default"] {
+  --surface: #f8fafc;
+  --surface-alt: #eef4fa;
+  --surface-card: #ffffff;
+  --tertiary: #dae3ed;
+  --hover: #e8eff7;
+  --text-primary: #0f172a;
+  --text-secondary: #5a6a80;
+  --border: #cbd5e1;
+  --border-faint: rgba(203, 213, 225, 0.5);
+}
+
+/* ========== Theme: Ocean ========== */
+[data-theme="ocean"] {
+  --brand-50: #ecfeff;
+  --brand-100: #cffafe;
+  --brand-200: #a5f3fc;
+  --brand-300: #67e8f9;
+  --brand-400: #22d3ee;
+  --brand-500: #06b6d4;
+  --brand-600: #0891b2;
+  --brand-700: #0e7490;
+  --brand-800: #155e75;
+  --brand-900: #164e63;
+  --brand-950: #083344;
+}
+.dark[data-theme="ocean"] {
+  --surface: #091a1f;
+  --surface-alt: #0e2429;
+  --surface-card: #122d33;
+  --tertiary: #1a3d46;
+  --hover: #1a3d46;
+  --text-primary: #d4f1f4;
+  --text-secondary: #6ba3ad;
+  --border: #1a3d46;
+  --border-faint: rgba(26, 61, 70, 0.5);
+}
+.light[data-theme="ocean"] {
+  --surface: #f2fbfc;
+  --surface-alt: #e6f7f9;
+  --surface-card: #ffffff;
+  --tertiary: #c8edf2;
+  --hover: #d9f3f7;
+  --text-primary: #0a2e34;
+  --text-secondary: #4d7e87;
+  --border: #a8dce3;
+  --border-faint: rgba(168, 220, 227, 0.5);
+}
+
+/* ========== Theme: Ember ========== */
+[data-theme="ember"] {
+  --brand-50: #fff7ed;
+  --brand-100: #ffedd5;
+  --brand-200: #fed7aa;
+  --brand-300: #fdba74;
+  --brand-400: #fb923c;
+  --brand-500: #f97316;
+  --brand-600: #ea580c;
+  --brand-700: #c2410c;
+  --brand-800: #9a3412;
+  --brand-900: #7c2d12;
+  --brand-950: #431407;
+}
+.dark[data-theme="ember"] {
+  --surface: #1a0e08;
+  --surface-alt: #251610;
+  --surface-card: #2e1c14;
+  --tertiary: #422a1c;
+  --hover: #422a1c;
+  --text-primary: #fde8d8;
+  --text-secondary: #b8876a;
+  --border: #422a1c;
+  --border-faint: rgba(66, 42, 28, 0.5);
+}
+.light[data-theme="ember"] {
+  --surface: #fefaf6;
+  --surface-alt: #fef3ea;
+  --surface-card: #ffffff;
+  --tertiary: #fcdec4;
+  --hover: #fde8d3;
+  --text-primary: #3b1506;
+  --text-secondary: #8a5c3d;
+  --border: #f5c9a0;
+  --border-faint: rgba(245, 201, 160, 0.5);
+}
+
+/* ========== Theme: Forest ========== */
+[data-theme="forest"] {
+  --brand-50: #ecfdf5;
+  --brand-100: #d1fae5;
+  --brand-200: #a7f3d0;
+  --brand-300: #6ee7b7;
+  --brand-400: #34d399;
+  --brand-500: #10b981;
+  --brand-600: #059669;
+  --brand-700: #047857;
+  --brand-800: #065f46;
+  --brand-900: #064e3b;
+  --brand-950: #022c22;
+}
+.dark[data-theme="forest"] {
+  --surface: #071210;
+  --surface-alt: #0d1c18;
+  --surface-card: #11251f;
+  --tertiary: #19362d;
+  --hover: #19362d;
+  --text-primary: #d1f5e4;
+  --text-secondary: #6aaa8c;
+  --border: #19362d;
+  --border-faint: rgba(25, 54, 45, 0.5);
+}
+.light[data-theme="forest"] {
+  --surface: #f4fcf8;
+  --surface-alt: #e8f9f0;
+  --surface-card: #ffffff;
+  --tertiary: #c6edda;
+  --hover: #d6f3e5;
+  --text-primary: #0a3324;
+  --text-secondary: #4d8a6e;
+  --border: #a2dcc0;
+  --border-faint: rgba(162, 220, 192, 0.5);
+}
+
+/* ========== Theme: Violet ========== */
+[data-theme="violet"] {
+  --brand-50: #f5f3ff;
+  --brand-100: #ede9fe;
+  --brand-200: #ddd6fe;
+  --brand-300: #c4b5fd;
+  --brand-400: #a78bfa;
+  --brand-500: #8b5cf6;
+  --brand-600: #7c3aed;
+  --brand-700: #6d28d9;
+  --brand-800: #5b21b6;
+  --brand-900: #4c1d95;
+  --brand-950: #2e1065;
+}
+.dark[data-theme="violet"] {
+  --surface: #110d1e;
+  --surface-alt: #19132b;
+  --surface-card: #1f1835;
+  --tertiary: #2d2349;
+  --hover: #2d2349;
+  --text-primary: #e8e0f8;
+  --text-secondary: #9683b8;
+  --border: #2d2349;
+  --border-faint: rgba(45, 35, 73, 0.5);
+}
+.light[data-theme="violet"] {
+  --surface: #faf8ff;
+  --surface-alt: #f1edfc;
+  --surface-card: #ffffff;
+  --tertiary: #ddd4f5;
+  --hover: #e9e3fa;
+  --text-primary: #1e0f3d;
+  --text-secondary: #7560a0;
+  --border: #c7b9e8;
+  --border-faint: rgba(199, 185, 232, 0.5);
+}
+
+@layer base {
+  body {
+    background-color: var(--surface);
+    color: var(--text-primary);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl p-4 shadow-lg;
+    background-color: var(--surface-card);
+    border: 1px solid var(--border);
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+  }
+  .badge-green {
+    @apply badge bg-emerald-500/10 text-emerald-400 ring-1 ring-inset ring-emerald-500/20;
+  }
+  .badge-yellow {
+    @apply badge bg-amber-500/10 text-amber-400 ring-1 ring-inset ring-amber-500/20;
+  }
+  .badge-red {
+    @apply badge bg-red-500/10 text-red-400 ring-1 ring-inset ring-red-500/20;
+  }
+
+  .light .badge-green {
+    @apply bg-emerald-50 text-emerald-700 ring-emerald-200;
+  }
+  .light .badge-yellow {
+    @apply bg-amber-50 text-amber-700 ring-amber-200;
+  }
+  .light .badge-red {
+    @apply bg-red-50 text-red-700 ring-red-200;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn text-white;
+    background-color: var(--brand-600);
+  }
+  .btn-primary:hover {
+    background-color: var(--brand-700);
+  }
+  .btn-ghost {
+    @apply btn;
+    color: var(--text-secondary);
+  }
+  .btn-ghost:hover {
+    background-color: var(--hover);
+    color: var(--text-primary);
+  }
+
+  .input-field {
+    @apply rounded-lg border p-2.5 text-sm;
+    background-color: var(--tertiary);
+    border-color: var(--border);
+    color: var(--text-primary);
+  }
+  .input-field:focus {
+    outline: none;
+    border-color: var(--brand-500);
+    box-shadow: 0 0 0 1px var(--brand-500);
+  }
+  .input-field::placeholder {
+    color: var(--text-secondary);
+  }
+
+  select.input-field {
+    appearance: auto;
+  }
+}

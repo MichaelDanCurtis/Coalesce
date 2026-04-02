@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package agentpather;
+
+service AgentPatherService {
+    rpc ChatCompletion(ChatCompletionRequest) returns (ChatCompletionResponse);
+    rpc ChatCompletionStream(ChatCompletionRequest) returns (stream ChatCompletionChunk);
+    rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+    rpc GetHealth(HealthRequest) returns (HealthResponse);
+}
+
+message ChatCompletionRequest {
+    string model = 1;
+    repeated ChatMessage messages = 2;
+    optional float temperature = 3;
+    optional uint32 max_tokens = 4;
+    optional float top_p = 5;
+    repeated string stop = 6;
+    bool stream = 7;
+}
+
+message ChatMessage {
+    string role = 1;
+    string content = 2;
+}
+
+message ChatCompletionResponse {
+    string id = 1;
+    string model = 2;
+    repeated Choice choices = 3;
+    Usage usage = 4;
+    RoutingInfo routing = 5;
+}
+
+message Choice {
+    uint32 index = 1;
+    ChatMessage message = 2;
+    string finish_reason = 3;
+}
+
+message Usage {
+    uint32 prompt_tokens = 1;
+    uint32 completion_tokens = 2;
+    uint32 total_tokens = 3;
+}
+
+message RoutingInfo {
+    string tier = 1;
+    double score = 2;
+    string provider = 3;
+    string model = 4;
+    uint32 attempt = 5;
+}
+
+message ChatCompletionChunk {
+    string id = 1;
+    string model = 2;
+    repeated ChunkChoice choices = 3;
+}
+
+message ChunkChoice {
+    uint32 index = 1;
+    ChunkDelta delta = 2;
+    optional string finish_reason = 3;
+}
+
+message ChunkDelta {
+    optional string role = 1;
+    optional string content = 2;
+}
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+    repeated ModelInfo models = 1;
+}
+
+message ModelInfo {
+    string id = 1;
+    string name = 2;
+    string provider = 3;
+    string quality_tier = 4;
+    uint32 context_window = 5;
+    double input_price_per_m = 6;
+    double output_price_per_m = 7;
+    bool reasoning = 8;
+    bool vision = 9;
+    bool tool_calling = 10;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+    string status = 1;
+    uint32 provider_count = 2;
+    uint32 model_count = 3;
+}
