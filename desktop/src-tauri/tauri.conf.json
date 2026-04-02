@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicest-tools/config-schemas/refs/heads/main/tauri/tauri.conf.json.schema",
-  "productName": "AgentPather",
+  "productName": "HyperRouter",
   "version": "0.1.0",
-  "identifier": "dev.agentpather.desktop",
+  "identifier": "dev.hyperrouter.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "AgentPather",
+        "title": "HyperRouter",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -25,7 +25,7 @@
     "trayIcon": {
       "iconPath": "icons/tray-icon.png",
       "iconAsTemplate": true,
-      "tooltip": "AgentPather"
+      "tooltip": "HyperRouter"
     },
     "security": {
       "csp": null
@@ -48,7 +48,7 @@
     "updater": {
       "pubkey": "",
       "endpoints": [
-        "https://github.com/anthropics/agentpather/releases/latest/download/latest.json"
+        "https://github.com/MichaelDanCurtis/HyperRouter/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
