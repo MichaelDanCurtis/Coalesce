@@ -1,22 +1,22 @@
-//! gRPC transport layer for AgentPather proxy.
+//! gRPC transport layer for Coalesce proxy.
 //!
 //! Runs on port 8403 (HTTP port + 1) alongside the HTTP/REST server.
 //! Provides the same routing, model listing, and health functionality
 //! over gRPC with protobuf-encoded messages for high-frequency agent communication.
 
 use crate::ProxyState;
-use agentpather_core::economics::marginal_cost::MarginalCost;
-use agentpather_core::types::{ChatRequest, Message, MessageContent, StopSequence};
+use coalesce_core::economics::marginal_cost::MarginalCost;
+use coalesce_core::types::{ChatRequest, Message, MessageContent, StopSequence};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, warn};
 
 /// Generated protobuf types and service trait.
 pub mod pb {
-    tonic::include_proto!("agentpather");
+    tonic::include_proto!("coalesce");
 }
 
-use pb::agent_pather_service_server::{AgentPatherService, AgentPatherServiceServer};
+use pb::coalesce_service_server::{CoalesceService, CoalesceServiceServer};
 
 /// gRPC service handler backed by the shared proxy state.
 pub struct GrpcHandler {
@@ -30,7 +30,7 @@ impl GrpcHandler {
 }
 
 #[tonic::async_trait]
-impl AgentPatherService for GrpcHandler {
+impl CoalesceService for GrpcHandler {
     async fn chat_completion(
         &self,
         request: Request<pb::ChatCompletionRequest>,
@@ -75,7 +75,7 @@ impl AgentPatherService for GrpcHandler {
         };
 
         // Score and route
-        let scoring = agentpather_core::router::route(&chat_request, &self.state.config.routing);
+        let scoring = coalesce_core::router::route(&chat_request, &self.state.config.routing);
         info!(
             tier = %scoring.tier,
             score = scoring.score,
@@ -83,15 +83,15 @@ impl AgentPatherService for GrpcHandler {
         );
 
         // Snapshot models and providers (clone to avoid holding RwLockReadGuard across await)
-        let models_snapshot: Vec<agentpather_core::types::ModelInfo> = self.state.models.read().unwrap().clone();
-        let providers_snapshot: Vec<std::sync::Arc<dyn agentpather_core::providers::Provider>> = self.state.providers.read().unwrap().clone();
+        let models_snapshot: Vec<coalesce_core::types::ModelInfo> = self.state.models.read().unwrap().clone();
+        let providers_snapshot: Vec<std::sync::Arc<dyn coalesce_core::providers::Provider>> = self.state.providers.read().unwrap().clone();
 
         let costs: Vec<MarginalCost> = models_snapshot
             .iter()
             .map(|m| self.state.economics.marginal_cost(m, 1000, 500))
             .collect();
 
-        let mut candidates: Vec<(usize, &agentpather_core::types::ModelInfo)> = models_snapshot
+        let mut candidates: Vec<(usize, &coalesce_core::types::ModelInfo)> = models_snapshot
             .iter()
             .enumerate()
             .filter(|(_, m)| m.quality_tier.can_handle(&scoring.tier))
@@ -165,7 +165,7 @@ impl AgentPatherService for GrpcHandler {
 
                     // Log request
                     let _ = self.state.storage.log_request(
-                        &agentpather_core::storage::RequestLogEntry {
+                        &coalesce_core::storage::RequestLogEntry {
                             tier: scoring.tier.to_string(),
                             score: scoring.score,
                             provider: selected.provider.clone(),
@@ -257,7 +257,7 @@ impl AgentPatherService for GrpcHandler {
 
                     // Log failure
                     let _ = self.state.storage.log_request(
-                        &agentpather_core::storage::RequestLogEntry {
+                        &coalesce_core::storage::RequestLogEntry {
                             tier: scoring.tier.to_string(),
                             score: scoring.score,
                             provider: selected.provider.clone(),
@@ -334,17 +334,17 @@ impl AgentPatherService for GrpcHandler {
         };
 
         // Score and route
-        let scoring = agentpather_core::router::route(&chat_request, &self.state.config.routing);
+        let scoring = coalesce_core::router::route(&chat_request, &self.state.config.routing);
 
         // Find best available model (snapshot to avoid holding lock across await)
-        let models_snapshot: Vec<agentpather_core::types::ModelInfo> = self.state.models.read().unwrap().clone();
-        let providers_snapshot: Vec<std::sync::Arc<dyn agentpather_core::providers::Provider>> = self.state.providers.read().unwrap().clone();
+        let models_snapshot: Vec<coalesce_core::types::ModelInfo> = self.state.models.read().unwrap().clone();
+        let providers_snapshot: Vec<std::sync::Arc<dyn coalesce_core::providers::Provider>> = self.state.providers.read().unwrap().clone();
         let costs: Vec<MarginalCost> = models_snapshot
             .iter()
             .map(|m| self.state.economics.marginal_cost(m, 1000, 500))
             .collect();
 
-        let mut candidates: Vec<(usize, &agentpather_core::types::ModelInfo)> = models_snapshot
+        let mut candidates: Vec<(usize, &coalesce_core::types::ModelInfo)> = models_snapshot
             .iter()
             .enumerate()
             .filter(|(_, m)| m.quality_tier.can_handle(&scoring.tier))
@@ -496,7 +496,7 @@ impl AgentPatherService for GrpcHandler {
 /// Extract token usage from a JSON response for logging.
 fn extract_usage(
     response: &serde_json::Value,
-    model: &agentpather_core::types::ModelInfo,
+    model: &coalesce_core::types::ModelInfo,
 ) -> (Option<u32>, Option<u32>, Option<f64>) {
     if let Some(usage) = response.get("usage") {
         let input = usage
@@ -521,8 +521,8 @@ fn extract_usage(
 }
 
 /// Create the gRPC service for adding to a tonic server.
-pub fn create_service(state: Arc<ProxyState>) -> AgentPatherServiceServer<GrpcHandler> {
-    AgentPatherServiceServer::new(GrpcHandler::new(state))
+pub fn create_service(state: Arc<ProxyState>) -> CoalesceServiceServer<GrpcHandler> {
+    CoalesceServiceServer::new(GrpcHandler::new(state))
 }
 
 /// Start the gRPC server on the configured port + 1 (default 8403).

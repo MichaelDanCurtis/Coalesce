@@ -1,5 +1,5 @@
 use super::{ByteStream, Provider};
-use crate::error::{AgentPatherError, Result};
+use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, ModelInfo, QualityTier};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -36,7 +36,7 @@ impl Provider for OllamaProvider {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "ollama".into(),
                 message: format!("Model list failed: {}", resp.status()),
                 status: Some(resp.status().as_u16()),
@@ -65,7 +65,7 @@ impl Provider for OllamaProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "ollama".into(),
                 message: format!("Chat failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
@@ -90,7 +90,7 @@ impl Provider for OllamaProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "ollama".into(),
                 message: format!("Stream failed ({}): {}", status, body),
                 status: Some(status.as_u16()),

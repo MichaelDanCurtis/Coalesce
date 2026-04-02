@@ -124,7 +124,7 @@ export default function Settings({ theme }: { theme: ThemeHook }) {
               <p className="text-sm">Config File</p>
               <p className="text-xs text-secondary">Edit the TOML config to add providers</p>
             </div>
-            <code className="rounded bg-tertiary px-3 py-1 text-sm">agentpather.toml</code>
+            <code className="rounded bg-tertiary px-3 py-1 text-sm">coalesce.toml</code>
           </div>
         </div>
       </div>
@@ -141,7 +141,7 @@ export default function Settings({ theme }: { theme: ThemeHook }) {
       <div className="card">
         <h3 className="text-sm font-medium mb-4">{t("settings.about")}</h3>
         <div className="space-y-2 text-sm text-secondary">
-          <p>AgentPather v0.1.0</p>
+          <p>Coalesce v0.1.0</p>
           <p>Smart LLM routing proxy with dynamic cost optimization</p>
           <p className="text-xs opacity-60">Built with Rust + Tauri 2 + React</p>
         </div>
@@ -185,7 +185,7 @@ function AutoStartToggle() {
     <div className="flex items-center justify-between">
       <div>
         <p className="text-sm">Launch at Login</p>
-        <p className="text-xs text-secondary">Start AgentPather when you log in</p>
+        <p className="text-xs text-secondary">Start Coalesce when you log in</p>
       </div>
       <button
         onClick={toggle}

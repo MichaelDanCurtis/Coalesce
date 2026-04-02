@@ -37,6 +37,6 @@ pub fn discover_plugins() -> Vec<PluginConfig> {
 pub fn default_plugin_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather")
+        .join("coalesce")
         .join("plugins")
 }

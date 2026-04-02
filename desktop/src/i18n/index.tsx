@@ -196,7 +196,7 @@ const I18nContext = createContext<I18nContextType>({
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocale] = useState<Locale>(() => {
-    const saved = localStorage.getItem("agentpather-locale");
+    const saved = localStorage.getItem("coalesce-locale");
     return (saved as Locale) || "en";
   });
 
@@ -206,7 +206,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const updateLocale = (l: Locale) => {
     setLocale(l);
-    localStorage.setItem("agentpather-locale", l);
+    localStorage.setItem("coalesce-locale", l);
   };
 
   return (

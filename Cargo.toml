@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/agentpather-core",
-    "crates/agentpather-proxy",
-    "crates/agentpather-cli",
+    "crates/coalesce-core",
+    "crates/coalesce-proxy",
+    "crates/coalesce-cli",
     "desktop/src-tauri",
 ]
 resolver = "2"
@@ -68,5 +68,5 @@ prost = "0.13"
 tonic-build = "0.12"
 
 # Internal crates
-agentpather-core = { path = "crates/agentpather-core" }
-agentpather-proxy = { path = "crates/agentpather-proxy" }
+coalesce-core = { path = "crates/coalesce-core" }
+coalesce-proxy = { path = "crates/coalesce-proxy" }

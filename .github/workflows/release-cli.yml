@@ -64,30 +64,30 @@ jobs:
 
       - name: Build with cross
         if: matrix.cross
-        run: cross build --release -p agentpather-cli --target ${{ matrix.target }}
+        run: cross build --release -p coalesce-cli --target ${{ matrix.target }}
 
       - name: Build with cargo
         if: "!matrix.cross"
-        run: cargo build --release -p agentpather-cli --target ${{ matrix.target }}
+        run: cargo build --release -p coalesce-cli --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../agentpather-${{ matrix.target }}.tar.gz agentpather
+          tar czf ../../../coalesce-${{ matrix.target }}.tar.gz coalesce
           cd ../../..
 
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/agentpather.exe" -DestinationPath "agentpather-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/coalesce.exe" -DestinationPath "coalesce-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: agentpather-${{ matrix.target }}
-          path: agentpather-${{ matrix.target }}.*
+          name: coalesce-${{ matrix.target }}
+          path: coalesce-${{ matrix.target }}.*
 
   release:
     name: Create Release

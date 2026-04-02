@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser)]
-#[command(name = "agentpather", about = "Smart LLM routing proxy", version)]
+#[command(name = "coalesce", about = "Smart LLM routing proxy", version)]
 struct Cli {
     /// Config file path
     #[arg(short, long, global = true)]
@@ -32,7 +32,7 @@ enum Commands {
     Doctor,
     /// Generate a default config file
     Init {
-        /// Output path (default: ./agentpather.toml)
+        /// Output path (default: ./coalesce.toml)
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
@@ -40,7 +40,7 @@ enum Commands {
     Stats,
     /// Start the MCP (Model Context Protocol) server over stdio
     Mcp {
-        /// AgentPather proxy URL to connect to
+        /// Coalesce proxy URL to connect to
         #[arg(long, default_value = "http://127.0.0.1:8402")]
         proxy_url: String,
     },
@@ -117,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load config first to get logging settings
     let mut config =
-        agentpather_core::config::AppConfig::load(cli.config.as_ref()).unwrap_or_default();
+        coalesce_core::config::AppConfig::load(cli.config.as_ref()).unwrap_or_default();
 
     // Init logging based on config
     init_logging(&config.logging);
@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(h) = host {
                 config.server.host = h;
             }
-            agentpather_proxy::start_server(config).await?;
+            coalesce_proxy::start_server(config).await?;
         }
         Some(Commands::Models) => {
             print_models(&config).await?;
@@ -139,8 +139,8 @@ async fn main() -> anyhow::Result<()> {
             run_doctor(&config).await?;
         }
         Some(Commands::Init { output }) => {
-            let path = output.unwrap_or_else(|| PathBuf::from("agentpather.toml"));
-            agentpather_core::config::AppConfig::write_default(&path)?;
+            let path = output.unwrap_or_else(|| PathBuf::from("coalesce.toml"));
+            coalesce_core::config::AppConfig::write_default(&path)?;
             println!("Config template written to {}", path.display());
         }
         Some(Commands::Mcp { proxy_url }) => {
@@ -178,17 +178,17 @@ async fn main() -> anyhow::Result<()> {
         }
         None => {
             // Default: start server
-            agentpather_proxy::start_server(config).await?;
+            coalesce_proxy::start_server(config).await?;
         }
     }
 
     Ok(())
 }
 
-fn init_logging(logging: &agentpather_core::config::LoggingConfig) {
+fn init_logging(logging: &coalesce_core::config::LoggingConfig) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| {
-            EnvFilter::new(format!("agentpather={}", logging.level))
+            EnvFilter::new(format!("coalesce={}", logging.level))
         });
 
     match logging.format.as_str() {
@@ -209,12 +209,12 @@ fn init_logging(logging: &agentpather_core::config::LoggingConfig) {
     }
 }
 
-async fn print_models(config: &agentpather_core::config::AppConfig) -> anyhow::Result<()> {
-    use agentpather_core::providers::copilot::CopilotProvider;
-    use agentpather_core::providers::ollama::OllamaProvider;
-    use agentpather_core::providers::openai_compat::factories;
-    use agentpather_core::providers::openrouter::OpenRouterProvider;
-    use agentpather_core::providers::Provider;
+async fn print_models(config: &coalesce_core::config::AppConfig) -> anyhow::Result<()> {
+    use coalesce_core::providers::copilot::CopilotProvider;
+    use coalesce_core::providers::ollama::OllamaProvider;
+    use coalesce_core::providers::openai_compat::factories;
+    use coalesce_core::providers::openrouter::OpenRouterProvider;
+    use coalesce_core::providers::Provider;
 
     println!("Discovering models...\n");
 
@@ -303,11 +303,11 @@ async fn print_models(config: &agentpather_core::config::AppConfig) -> anyhow::R
     Ok(())
 }
 
-async fn run_doctor(config: &agentpather_core::config::AppConfig) -> anyhow::Result<()> {
-    use agentpather_core::providers::ollama::OllamaProvider;
-    use agentpather_core::providers::Provider;
+async fn run_doctor(config: &coalesce_core::config::AppConfig) -> anyhow::Result<()> {
+    use coalesce_core::providers::ollama::OllamaProvider;
+    use coalesce_core::providers::Provider;
 
-    println!("AgentPather Doctor\n");
+    println!("Coalesce Doctor\n");
     println!("Checking providers...\n");
 
     let mut ok_count = 0;
@@ -357,8 +357,8 @@ async fn run_doctor(config: &agentpather_core::config::AppConfig) -> anyhow::Res
     // Check data directory
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather");
-    let db_exists = data_dir.join("agentpather.db").exists();
+        .join("coalesce");
+    let db_exists = data_dir.join("coalesce.db").exists();
 
     println!("\nStorage:");
     println!("  Data dir: {}", data_dir.display());
@@ -374,7 +374,7 @@ async fn run_bench(total_requests: u32, concurrency: u32, target: &str, routing_
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    println!("AgentPather Benchmark");
+    println!("Coalesce Benchmark");
     println!("=====================");
     println!("Target:      {}", target);
     println!("Requests:    {}", total_requests);
@@ -511,7 +511,7 @@ fn percentile(sorted: &[u64], pct: f64) -> u64 {
 }
 
 async fn run_auth_copilot() -> anyhow::Result<()> {
-    use agentpather_core::providers::copilot::CopilotProvider;
+    use coalesce_core::providers::copilot::CopilotProvider;
 
     println!("Authenticating with GitHub Copilot...\n");
 
@@ -533,10 +533,10 @@ async fn run_auth_copilot() -> anyhow::Result<()> {
     // Save token to storage
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather");
+        .join("coalesce");
     std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("agentpather.db");
-    let storage = agentpather_core::storage::Storage::open(&db_path)?;
+    let db_path = data_dir.join("coalesce.db");
+    let storage = coalesce_core::storage::Storage::open(&db_path)?;
     storage.save_token("copilot", &token, None)?;
 
     println!("\nAuthentication successful! Token saved.");
@@ -557,15 +557,15 @@ fn print_history(
 ) -> anyhow::Result<()> {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather");
-    let db_path = data_dir.join("agentpather.db");
+        .join("coalesce");
+    let db_path = data_dir.join("coalesce.db");
 
     if !db_path.exists() {
         println!("No database found. Run the server first to create it.");
         return Ok(());
     }
 
-    let storage = agentpather_core::storage::Storage::open(&db_path)?;
+    let storage = coalesce_core::storage::Storage::open(&db_path)?;
     let entries = storage.filtered_requests(limit, provider, tier, failures_only)?;
 
     if entries.is_empty() {
@@ -598,11 +598,11 @@ fn print_history(
 fn run_config_edit() -> anyhow::Result<()> {
     // Find config file path
     let search_paths = vec![
-        PathBuf::from("agentpather.toml"),
+        PathBuf::from("coalesce.toml"),
         PathBuf::from("config.toml"),
         dirs::config_dir()
             .unwrap_or_default()
-            .join("agentpather")
+            .join("coalesce")
             .join("config.toml"),
     ];
 
@@ -614,10 +614,10 @@ fn run_config_edit() -> anyhow::Result<()> {
         // Create default config in config dir
         let dir = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("agentpather");
+            .join("coalesce");
         std::fs::create_dir_all(&dir)?;
         let p = dir.join("config.toml");
-        agentpather_core::config::AppConfig::write_default(&p)?;
+        coalesce_core::config::AppConfig::write_default(&p)?;
         println!("Created default config at {}", p.display());
         p
     };
@@ -644,10 +644,10 @@ fn run_config_edit() -> anyhow::Result<()> {
 fn run_exclude(pattern: Option<&str>, remove: bool, list: bool) -> anyhow::Result<()> {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather");
+        .join("coalesce");
     std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("agentpather.db");
-    let storage = agentpather_core::storage::Storage::open(&db_path)?;
+    let db_path = data_dir.join("coalesce.db");
+    let storage = coalesce_core::storage::Storage::open(&db_path)?;
 
     let key = "exclude_patterns";
 
@@ -698,18 +698,18 @@ fn run_exclude(pattern: Option<&str>, remove: bool, list: bool) -> anyhow::Resul
 fn print_stats() -> anyhow::Result<()> {
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("agentpather");
-    let db_path = data_dir.join("agentpather.db");
+        .join("coalesce");
+    let db_path = data_dir.join("coalesce.db");
 
     if !db_path.exists() {
         println!("No database found. Run the server first to create it.");
         return Ok(());
     }
 
-    let storage = agentpather_core::storage::Storage::open(&db_path)?;
+    let storage = coalesce_core::storage::Storage::open(&db_path)?;
     let stats = storage.stats()?;
 
-    println!("AgentPather Stats\n");
+    println!("Coalesce Stats\n");
     println!("  Total requests:    {}", stats.total_requests);
     println!("  Successful:        {}", stats.successful_requests);
     println!(

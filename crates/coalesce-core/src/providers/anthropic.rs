@@ -1,5 +1,5 @@
 use super::{ByteStream, Provider};
-use crate::error::{AgentPatherError, Result};
+use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, MessageContent, ModelInfo, QualityTier};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -590,7 +590,7 @@ impl Provider for AnthropicProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "anthropic".into(),
                 message: format!("Chat failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
@@ -598,7 +598,7 @@ impl Provider for AnthropicProvider {
         }
 
         let anthropic_resp: AnthropicResponse = resp.json().await.map_err(|e| {
-            AgentPatherError::Provider {
+            CoalesceError::Provider {
                 provider: "anthropic".into(),
                 message: format!("Failed to parse response: {}", e),
                 status: None,
@@ -625,7 +625,7 @@ impl Provider for AnthropicProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "anthropic".into(),
                 message: format!("Stream failed ({}): {}", status, body),
                 status: Some(status.as_u16()),

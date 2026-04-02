@@ -1,22 +1,22 @@
-# AgentPather — Product Requirements Document
+# Coalesce — Product Requirements Document
 
 ## Overview
 
-AgentPather is a smart LLM routing system with two components:
+Coalesce is a smart LLM routing system with two components:
 
-1. **AgentPather Core** — A high-performance Rust proxy that routes LLM requests across providers using a dynamic cost optimization engine
-2. **AgentPather Desktop** — A Tauri 2 cross-platform desktop app (Windows, macOS, Linux) with system tray integration for quick provider switching, real-time monitoring, and master configuration
+1. **Coalesce Core** — A high-performance Rust proxy that routes LLM requests across providers using a dynamic cost optimization engine
+2. **Coalesce Desktop** — A Tauri 2 cross-platform desktop app (Windows, macOS, Linux) with system tray integration for quick provider switching, real-time monitoring, and master configuration
 
 It is inspired by [ClawRouter](https://github.com/BlockRunAI/ClawRouter) (smart routing engine) and [CC Switch](https://github.com/farion1231/cc-switch) (desktop UX / system tray management), but is a ground-up Rust implementation with key differences:
 
 - **Removed**: x402 payment protocol, blockchain wallets, USDC micropayments, all crypto dependencies
 - **Added**: Dynamic provider economics engine, GitHub Copilot OAuth, OpenRouter, GLM, local model support
 - **Added**: Tauri 2 desktop app with system tray, web dashboard, cross-platform support
-- **Rewritten**: Everything in Rust (backend) + React/TypeScript (frontend), renamed to AgentPather
+- **Rewritten**: Everything in Rust (backend) + React/TypeScript (frontend), renamed to Coalesce
 
 ### What It Does
 
-AgentPather sits between AI agents/clients and LLM providers as a local HTTP proxy. It:
+Coalesce sits between AI agents/clients and LLM providers as a local HTTP proxy. It:
 - Analyzes each request across 15 weighted dimensions and classifies into complexity tiers
 - Computes the **real-time marginal cost** of every candidate model across all providers
 - Routes to the cheapest capable model — prioritizing free/included credits before paid options
@@ -44,7 +44,7 @@ AgentPather sits between AI agents/clients and LLM providers as a local HTTP pro
 
 ```
  ┌─────────────────────────────────────────────────────────────────────┐
- │                     AgentPather Desktop (Tauri 2)                   │
+ │                     Coalesce Desktop (Tauri 2)                   │
  │  ┌───────────────┐  ┌─────────────────────────────────────────┐    │
  │  │  System Tray   │  │  Main Window (React + TailwindCSS)     │    │
  │  │  ─────────────│  │  ┌──────────────────────────────────┐   │    │
@@ -60,7 +60,7 @@ AgentPather sits between AI agents/clients and LLM providers as a local HTTP pro
  └───────────────────────────────────┬─────────────────────────────────┘
                               Tauri IPC │
  ┌───────────────────────────────────▼─────────────────────────────────┐
- │                     AgentPather Core (Rust)                         │
+ │                     Coalesce Core (Rust)                         │
  │                                                                     │
  │  ┌──────────┐   ┌───────────────────────┐   ┌──────────────────┐   │
  │  │  Dedup   │──►│  15-Dimension Router  │──►│ Economics Engine │   │
@@ -151,7 +151,7 @@ Multilingual keyword support: English, Chinese, Japanese, Russian, German, Spani
 
 #### 1.3 Provider Economics Engine (Dynamic Cost Optimization)
 
-**This is the core differentiator from ClawRouter.** Instead of static tier-to-model mappings, AgentPather maintains a real-time understanding of every provider's billing model, subscription state, and marginal cost — then routes to minimize actual spend.
+**This is the core differentiator from ClawRouter.** Instead of static tier-to-model mappings, Coalesce maintains a real-time understanding of every provider's billing model, subscription state, and marginal cost — then routes to minimize actual spend.
 
 ##### Subscription Models
 
@@ -215,7 +215,7 @@ Within each priority band, models are ranked by **quality score** for the given 
 ##### Provider Config (TOML)
 
 ```toml
-# ~/.agentpather/providers.toml
+# ~/.coalesce/providers.toml
 
 [providers.copilot]
 enabled = true
@@ -314,7 +314,7 @@ The economics engine feeds the dashboard:
 Profiles now define **quality preferences**, not specific models. The economics engine handles model selection:
 
 ```toml
-# ~/.agentpather/routing.toml
+# ~/.coalesce/routing.toml
 
 [profiles.auto]
 description = "Balanced cost/quality"
@@ -356,7 +356,7 @@ daily_limit_usd = 5.00
 - Per-provider rate limiting (token bucket)
 
 #### 1.5 Startup & Binary
-- Single static binary: `agentpather`
+- Single static binary: `coalesce`
 - Startup time target: <10ms
 - Memory footprint target: <10MB idle
 - Default port: 8402 (same as ClawRouter for compatibility)
@@ -376,7 +376,7 @@ daily_limit_usd = 5.00
 - Streaming: SSE with `: OPENROUTER PROCESSING` keepalive comments
 
 #### 2.2 GitHub Copilot OAuth Provider
-**Device Flow (one-time setup via `agentpather auth copilot`):**
+**Device Flow (one-time setup via `coalesce auth copilot`):**
 
 1. `POST https://github.com/login/device/code`
    - `client_id`: `Iv1.b507a08c87ecfe98`
@@ -384,7 +384,7 @@ daily_limit_usd = 5.00
    - Returns: `device_code`, `user_code`, `verification_uri`
 2. Display user_code, open browser to `https://github.com/login/device`
 3. Poll `POST https://github.com/login/oauth/access_token` every 5s
-   - Returns: `access_token` (ghu_xxx) — persist to `~/.agentpather/copilot_token`
+   - Returns: `access_token` (ghu_xxx) — persist to `~/.coalesce/copilot_token`
 
 **Token refresh (automatic, every ~25 min):**
 1. `GET https://api.github.com/copilot_internal/v2/token`
@@ -469,22 +469,22 @@ Built-in `/metrics` endpoint exposing:
 
 ```
 # Request metrics
-agentpather_requests_total{provider, model, tier, status}
-agentpather_request_duration_seconds{provider, model, tier}
-agentpather_request_tokens_input{provider, model}
-agentpather_request_tokens_output{provider, model}
+coalesce_requests_total{provider, model, tier, status}
+coalesce_request_duration_seconds{provider, model, tier}
+coalesce_request_tokens_input{provider, model}
+coalesce_request_tokens_output{provider, model}
 
 # Routing metrics
-agentpather_routing_decisions_total{tier, profile}
-agentpather_routing_duration_seconds
+coalesce_routing_decisions_total{tier, profile}
+coalesce_routing_duration_seconds
 
 # Provider health
-agentpather_provider_errors_total{provider, error_type}
-agentpather_provider_circuit_state{provider}  # 0=closed, 1=open, 2=half-open
+coalesce_provider_errors_total{provider, error_type}
+coalesce_provider_circuit_state{provider}  # 0=closed, 1=open, 2=half-open
 
 # Cost metrics
-agentpather_cost_dollars_total{provider, model}
-agentpather_cost_savings_dollars_total  # vs baseline (Claude Opus)
+coalesce_cost_dollars_total{provider, model}
+coalesce_cost_savings_dollars_total  # vs baseline (Claude Opus)
 ```
 
 #### 4.2 SQLite Usage Database
@@ -521,15 +521,15 @@ CREATE TABLE provider_health (
 ```
 
 CLI commands:
-- `agentpather stats` — cost savings summary
-- `agentpather stats --daily` — daily breakdown
-- `agentpather stats --by-model` — per-model usage
-- `agentpather history` — recent request log
+- `coalesce stats` — cost savings summary
+- `coalesce stats --daily` — daily breakdown
+- `coalesce stats --by-model` — per-model usage
+- `coalesce history` — recent request log
 
 #### 4.3 Structured Logging
 - `tracing` crate with JSON output
 - Log levels: ERROR (failures), WARN (fallbacks, rate limits), INFO (requests), DEBUG (routing decisions), TRACE (full request/response)
-- Log file: `~/.agentpather/logs/agentpather.log` (rotated daily)
+- Log file: `~/.coalesce/logs/coalesce.log` (rotated daily)
 
 ---
 
@@ -537,19 +537,19 @@ CLI commands:
 
 #### 5.1 Multi-Tenant Mode
 - Support multiple named profiles with separate provider credentials
-- `X-AgentPather-Profile: <name>` header to select profile
+- `X-Coalesce-Profile: <name>` header to select profile
 - Independent routing configs, budgets, and stats per profile
 - Use case: agent fleets with different cost/quality tradeoffs
 
 #### 5.2 Request Priority Queues
 - REASONING tier gets priority in provider rate limit windows
 - SIMPLE tier can be delayed/batched during high load
-- Priority header: `X-AgentPather-Priority: high|normal|low`
+- Priority header: `X-Coalesce-Priority: high|normal|low`
 - Configurable queue depth and timeout
 
 #### 5.3 Cost Budgeting with Alerts
 ```toml
-# ~/.agentpather/config.toml
+# ~/.coalesce/config.toml
 [budget]
 daily_limit_usd = 10.00
 monthly_limit_usd = 200.00
@@ -558,7 +558,7 @@ alert_threshold = 0.80  # Alert at 80% of limit
 [budget.alerts]
 webhook_url = "https://hooks.slack.com/..."
 # or
-command = "notify-send 'AgentPather: budget alert'"
+command = "notify-send 'Coalesce: budget alert'"
 ```
 
 When limit hit: fall back to free/local models only.
@@ -568,7 +568,7 @@ When limit hit: fall back to free/local models only.
   - Completion rate (did the model finish without error?)
   - Tool call success rate
   - Response length vs expected
-  - User feedback signal (optional `X-AgentPather-Feedback: good|bad` header on follow-up)
+  - User feedback signal (optional `X-Coalesce-Feedback: good|bad` header on follow-up)
 - Exponential moving average per model
 - Adjust tier assignments based on observed quality
 - Store quality scores in SQLite
@@ -595,50 +595,50 @@ When limit hit: fall back to free/local models only.
 - Plugin interface:
   ```rust
   // Plugin can implement any of these hooks:
-  trait AgentPatherPlugin {
+  trait CoalescePlugin {
       fn on_request(&self, req: &Request) -> PluginResult<Request>;  // modify/filter
       fn on_route(&self, decision: &RouteDecision) -> PluginResult<RouteDecision>;  // override routing
       fn on_response(&self, resp: &Response) -> PluginResult<Response>;  // modify/log
   }
   ```
-- Plugins loaded from `~/.agentpather/plugins/*.wasm`
+- Plugins loaded from `~/.coalesce/plugins/*.wasm`
 - Plugin config in TOML
 - Use case: custom routing logic, request transformation, logging to external services
 
 #### 6.2 CLI Commands
 ```
-agentpather                     # Start proxy (default)
-agentpather serve               # Start proxy (explicit)
-agentpather serve --port 8402   # Custom port
+coalesce                     # Start proxy (default)
+coalesce serve               # Start proxy (explicit)
+coalesce serve --port 8402   # Custom port
 
 # Authentication
-agentpather auth copilot        # GitHub Copilot OAuth device flow
-agentpather auth openrouter     # Set OpenRouter API key
-agentpather auth status         # Show auth status for all providers
+coalesce auth copilot        # GitHub Copilot OAuth device flow
+coalesce auth openrouter     # Set OpenRouter API key
+coalesce auth status         # Show auth status for all providers
 
 # Stats & History
-agentpather stats               # Cost savings summary
-agentpather stats --daily       # Daily breakdown
-agentpather history             # Recent requests
-agentpather history --model gpt-5  # Filter by model
+coalesce stats               # Cost savings summary
+coalesce stats --daily       # Daily breakdown
+coalesce history             # Recent requests
+coalesce history --model gpt-5  # Filter by model
 
 # Config
-agentpather config show         # Show current config
-agentpather config edit         # Open config in $EDITOR
-agentpather config routing      # Show routing profiles
-agentpather config providers    # Show provider status
+coalesce config show         # Show current config
+coalesce config edit         # Open config in $EDITOR
+coalesce config routing      # Show routing profiles
+coalesce config providers    # Show provider status
 
 # Diagnostics
-agentpather doctor              # Health check all providers
-agentpather bench               # Load test routing throughput
+coalesce doctor              # Health check all providers
+coalesce bench               # Load test routing throughput
 
 # Models
-agentpather models              # List available models across all providers
-agentpather models --provider openrouter  # Filter by provider
-agentpather models --tier reasoning       # Filter by tier
-agentpather exclude add <model>           # Block a model
-agentpather exclude remove <model>
-agentpather exclude list
+coalesce models              # List available models across all providers
+coalesce models --provider openrouter  # Filter by provider
+coalesce models --tier reasoning       # Filter by tier
+coalesce exclude add <model>           # Block a model
+coalesce exclude remove <model>
+coalesce exclude list
 ```
 
 #### 6.3 Request Sandboxing (Input Validation)
@@ -664,7 +664,7 @@ Inspired by [CC Switch](https://github.com/farion1231/cc-switch). Cross-platform
 
 ```
 ┌─────────────────────────────────┐
-│  AgentPather                    │
+│  Coalesce                    │
 │  ─────────────────────────────  │
 │  Profile: ● Auto (balanced)    │
 │           ○ Eco (free only)    │
@@ -783,14 +783,14 @@ The same UI serves both the desktop app (via Tauri webview) and the browser (`lo
 #### 7.3 Tauri Architecture
 
 ```
-agentpather-desktop/
+coalesce-desktop/
 ├── src-tauri/                    # Rust backend (Tauri)
 │   ├── src/
 │   │   ├── main.rs              # Tauri app entry
 │   │   ├── tray.rs              # System tray (dynamic menu, events)
 │   │   ├── commands.rs          # Tauri IPC commands
 │   │   ├── state.rs             # Shared app state
-│   │   └── proxy_bridge.rs      # Bridge to agentpather-core
+│   │   └── proxy_bridge.rs      # Bridge to coalesce-core
 │   ├── Cargo.toml
 │   ├── tauri.conf.json
 │   └── icons/                   # App + tray icons (all platforms)
@@ -854,7 +854,7 @@ SSE  /api/v1/events                 — live event stream (routing decisions, st
 | Tray icon | Template (adapts to dark/light) | Standard colored icon | Standard icon |
 | Left-click tray | Opens menu | Toggles dashboard window | Opens menu |
 | Auto-start | Login items | Registry / Task Scheduler | XDG autostart |
-| Config dir | `~/Library/Application Support/AgentPather/` | `%APPDATA%/AgentPather/` | `~/.config/agentpather/` |
+| Config dir | `~/Library/Application Support/Coalesce/` | `%APPDATA%/Coalesce/` | `~/.config/coalesce/` |
 | Minimize behavior | Close window → tray | Minimize to tray | Close window → tray |
 | Native dialogs | macOS sheets | Win32 dialogs | GTK/Qt dialogs |
 
@@ -872,14 +872,14 @@ SSE  /api/v1/events                 — live event stream (routing decisions, st
 
 ### PHASE 8 — Built-in Load Testing
 
-#### 7.1 `agentpather bench`
+#### 7.1 `coalesce bench`
 ```
-agentpather bench                          # Quick benchmark (100 requests)
-agentpather bench --requests 10000         # Custom count
-agentpather bench --concurrency 50         # Concurrent clients
-agentpather bench --profile eco            # Test specific profile
-agentpather bench --provider copilot       # Test specific provider
-agentpather bench --report bench-results/  # Save detailed report
+coalesce bench                          # Quick benchmark (100 requests)
+coalesce bench --requests 10000         # Custom count
+coalesce bench --concurrency 50         # Concurrent clients
+coalesce bench --profile eco            # Test specific profile
+coalesce bench --provider copilot       # Test specific provider
+coalesce bench --report bench-results/  # Save detailed report
 ```
 
 Measures:
@@ -894,14 +894,14 @@ Measures:
 ## Repository Structure (Cargo Workspace)
 
 ```
-agentpather/
+coalesce/
 ├── Cargo.toml                       # Workspace root
 ├── Cargo.lock
 ├── README.md
 ├── LICENSE                          # MIT
 │
 ├── crates/
-│   ├── agentpather-core/            # Core library (routing, economics, providers)
+│   ├── coalesce-core/            # Core library (routing, economics, providers)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -974,7 +974,7 @@ agentpather/
 │   │           ├── validator.rs     # Schema validation
 │   │           └── injection.rs     # Prompt injection detection
 │   │
-│   ├── agentpather-proxy/           # HTTP/gRPC proxy server
+│   ├── coalesce-proxy/           # HTTP/gRPC proxy server
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
@@ -986,7 +986,7 @@ agentpather/
 │   │       ├── grpc.rs              # gRPC server (tonic)
 │   │       └── dashboard.rs         # Serve embedded web assets
 │   │
-│   └── agentpather-cli/             # CLI binary
+│   └── coalesce-cli/             # CLI binary
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs              # Entry point, clap dispatch
@@ -1002,7 +1002,7 @@ agentpather/
 │
 ├── desktop/                         # Tauri 2 desktop app
 │   ├── src-tauri/                   # Rust backend (Tauri shell)
-│   │   ├── Cargo.toml              # depends on agentpather-core + agentpather-proxy
+│   │   ├── Cargo.toml              # depends on coalesce-core + coalesce-proxy
 │   │   ├── tauri.conf.json
 │   │   ├── capabilities/           # Tauri security capabilities
 │   │   ├── icons/                  # App + tray icons (all platforms)
@@ -1043,7 +1043,7 @@ agentpather/
 │   └── index.html
 │
 ├── proto/                           # gRPC definitions
-│   └── agentpather.proto
+│   └── coalesce.proto
 │
 ├── config/                          # Default configs shipped with binary
 │   ├── default.toml                 # Default configuration
@@ -1074,7 +1074,7 @@ agentpather/
 
 ## Configuration
 
-### Main Config (`~/.agentpather/config.toml`)
+### Main Config (`~/.coalesce/config.toml`)
 
 ```toml
 [server]
@@ -1090,7 +1090,7 @@ rate_limit_rpm = 60
 
 [providers.copilot]
 enabled = true
-# Token stored in ~/.agentpather/copilot_token after `agentpather auth copilot`
+# Token stored in ~/.coalesce/copilot_token after `coalesce auth copilot`
 
 [providers.ollama]
 enabled = true
@@ -1115,8 +1115,8 @@ semantic = false
 session_timeout_mins = 30
 
 [storage]
-database = "~/.agentpather/agentpather.db"
-log_file = "~/.agentpather/logs/agentpather.log"
+database = "~/.coalesce/coalesce.db"
+log_file = "~/.coalesce/logs/coalesce.log"
 
 [metrics]
 enabled = true
@@ -1136,7 +1136,7 @@ rate_limit_rpm = 120  # per client IP
 
 [plugins]
 enabled = false
-directory = "~/.agentpather/plugins"
+directory = "~/.coalesce/plugins"
 ```
 
 ---
@@ -1144,13 +1144,13 @@ directory = "~/.agentpather/plugins"
 ## Implementation Phases
 
 ### Phase 1: Core Proxy & Router (Week 1-2)
-- Cargo workspace scaffolding (agentpather-core, agentpather-proxy, agentpather-cli)
+- Cargo workspace scaffolding (coalesce-core, coalesce-proxy, coalesce-cli)
 - axum HTTP server with /v1/chat/completions, /v1/models, /health
 - 15-dimension scorer (port from ClawRouter TypeScript)
 - TOML routing config with quality-based profiles
 - OpenRouter provider (simplest — just API key + model discovery)
 - Basic SSE streaming passthrough
-- CLI: `agentpather serve`
+- CLI: `coalesce serve`
 
 ### Phase 2: Economics Engine & Providers (Week 3-4)
 - Provider economics engine (marginal cost calculator, billing types)
@@ -1161,7 +1161,7 @@ directory = "~/.agentpather/plugins"
 - GLM / Zhipu AI provider
 - Kimi (Moonshot) provider
 - Direct providers: Anthropic (with format translation), Google, OpenAI, xAI, DeepSeek
-- CLI: `agentpather auth copilot`, `agentpather models`
+- CLI: `coalesce auth copilot`, `coalesce models`
 
 ### Phase 3: Reliability & Caching (Week 5)
 - Fallback chain with circuit breakers per provider
@@ -1175,7 +1175,7 @@ directory = "~/.agentpather/plugins"
 - Prometheus metrics endpoint (/metrics)
 - Structured logging (tracing crate, JSON output)
 - Dashboard REST API (/api/v1/*)
-- CLI: `agentpather stats`, `agentpather history`, `agentpather doctor`
+- CLI: `coalesce stats`, `coalesce history`, `coalesce doctor`
 
 ### Phase 5: Advanced Features (Week 7-8)
 - Multi-tenant profiles
@@ -1188,7 +1188,7 @@ directory = "~/.agentpather/plugins"
 - WASM plugin system (wasmtime)
 - gRPC transport (tonic, alongside HTTP)
 - Request sandboxing / prompt injection detection
-- Load testing (`agentpather bench`)
+- Load testing (`coalesce bench`)
 
 ### Phase 7: Desktop App (Week 10-12)
 - Tauri 2 project scaffolding
@@ -1237,6 +1237,6 @@ directory = "~/.agentpather/plugins"
 - **API**: OpenAI-compatible (`/v1/chat/completions`, `/v1/models`)
 - **Drop-in**: Works with any OpenAI SDK by setting base URL to `http://localhost:8402/v1`
 - **Port**: Default 8402 (same as ClawRouter for familiarity)
-- **Config dir**: Platform-aware (`~/.config/agentpather/` Linux, `~/Library/Application Support/AgentPather/` macOS, `%APPDATA%/AgentPather/` Windows)
+- **Config dir**: Platform-aware (`~/.config/coalesce/` Linux, `~/Library/Application Support/Coalesce/` macOS, `%APPDATA%/Coalesce/` Windows)
 - **Desktop**: .dmg (macOS), .msi (Windows), .AppImage + .deb (Linux)
 - **CLI**: Single binary, all platforms

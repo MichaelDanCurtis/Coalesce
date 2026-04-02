@@ -1,5 +1,5 @@
 use super::{ByteStream, Provider};
-use crate::error::{AgentPatherError, Result};
+use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, ModelInfo, QualityTier};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -28,11 +28,11 @@ impl OpenRouterProvider {
         );
         headers.insert(
             "HTTP-Referer",
-            "https://agentpather.dev".parse().unwrap(),
+            "https://coalesce.dev".parse().unwrap(),
         );
         headers.insert(
             "X-Title",
-            "AgentPather".parse().unwrap(),
+            "Coalesce".parse().unwrap(),
         );
         headers
     }
@@ -53,7 +53,7 @@ impl Provider for OpenRouterProvider {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "openrouter".into(),
                 message: format!("Model list failed: {}", resp.status()),
                 status: Some(resp.status().as_u16()),
@@ -82,7 +82,7 @@ impl Provider for OpenRouterProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "openrouter".into(),
                 message: format!("Chat failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
@@ -109,7 +109,7 @@ impl Provider for OpenRouterProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: "openrouter".into(),
                 message: format!("Stream failed ({}): {}", status, body),
                 status: Some(status.as_u16()),

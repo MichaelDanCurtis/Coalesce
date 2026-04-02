@@ -1,8 +1,8 @@
 syntax = "proto3";
 
-package agentpather;
+package coalesce;
 
-service AgentPatherService {
+service CoalesceService {
     rpc ChatCompletion(ChatCompletionRequest) returns (ChatCompletionResponse);
     rpc ChatCompletionStream(ChatCompletionRequest) returns (stream ChatCompletionChunk);
     rpc ListModels(ListModelsRequest) returns (ListModelsResponse);

@@ -9,7 +9,7 @@ interface ThemeState {
   resolved: "light" | "dark";
 }
 
-const STORAGE_KEY = "agentpather-theme";
+const STORAGE_KEY = "coalesce-theme";
 
 function getSystemPreference(): "light" | "dark" {
   if (typeof window === "undefined") return "dark";

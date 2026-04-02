@@ -37,9 +37,9 @@ pub fn update_tray_menu(app: &AppHandle, health: &HealthData) -> Result<(), Box<
 
         // Update tooltip with status
         let tooltip = if health.status == "ok" {
-            format!("AgentPather - {} providers | ${:.4} saved", health.providers.len(), health.total_savings_usd)
+            format!("Coalesce - {} providers | ${:.4} saved", health.providers.len(), health.total_savings_usd)
         } else {
-            "AgentPather - Proxy Offline".to_string()
+            "Coalesce - Proxy Offline".to_string()
         };
         tray.set_tooltip(Some(&tooltip))?;
     }
@@ -97,7 +97,7 @@ fn build_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<tauri::men
 
     let open = MenuItemBuilder::with_id("open", "Open Dashboard").build(app)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit AgentPather").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit Coalesce").build(app)?;
 
     let menu = builder
         .item(&open)
@@ -113,7 +113,7 @@ fn build_tray_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<(), B
 
     let _tray = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
-        .tooltip("AgentPather - LLM Router")
+        .tooltip("Coalesce - LLM Router")
         .on_menu_event(move |app, event| {
             match event.id().as_ref() {
                 "open" => {

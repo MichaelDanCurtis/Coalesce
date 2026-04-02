@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum AgentPatherError {
+pub enum CoalesceError {
     #[error("Provider error: {provider} - {message}")]
     Provider {
         provider: String,
@@ -52,4 +52,4 @@ pub enum AgentPatherError {
     Other(#[from] anyhow::Error),
 }
 
-pub type Result<T> = std::result::Result<T, AgentPatherError>;
+pub type Result<T> = std::result::Result<T, CoalesceError>;

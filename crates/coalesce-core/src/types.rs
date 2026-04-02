@@ -142,7 +142,7 @@ pub struct Delta {
     pub tool_calls: Option<Vec<serde_json::Value>>,
 }
 
-/// Model info as understood by AgentPather
+/// Model info as understood by Coalesce
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// Full model ID (e.g., "openai/gpt-5.2" or "anthropic/claude-sonnet-4.6")

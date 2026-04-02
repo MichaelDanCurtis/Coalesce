@@ -1,16 +1,16 @@
 [package]
-name = "agentpather-cli"
+name = "coalesce-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "agentpather"
+name = "coalesce"
 path = "src/main.rs"
 
 [dependencies]
-agentpather-core = { workspace = true }
-agentpather-proxy = { workspace = true }
+coalesce-core = { workspace = true }
+coalesce-proxy = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

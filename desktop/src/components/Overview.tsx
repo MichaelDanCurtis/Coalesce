@@ -16,7 +16,7 @@ export default function Overview() {
       <div className="card border-red-900 text-center py-12">
         <p className="text-red-400 text-lg font-medium">Proxy Offline</p>
         <p className="text-secondary mt-2 text-sm">
-          Start the proxy with: <code className="bg-tertiary px-2 py-1 rounded">agentpather serve</code>
+          Start the proxy with: <code className="bg-tertiary px-2 py-1 rounded">coalesce serve</code>
         </p>
       </div>
     );

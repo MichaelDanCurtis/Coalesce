@@ -38,27 +38,27 @@ git clone https://github.com/MichaelDanCurtis/Coalesce.git
 cd Coalesce
 cargo build --release
 
-# Binary is at target/release/agentpather
+# Binary is at target/release/coalesce
 ```
 
 ### Configure
 
 ```bash
 # Generate a config template
-./target/release/agentpather init
+./target/release/coalesce init
 
-# Edit agentpather.toml -- enable providers, add API keys
-$EDITOR agentpather.toml
+# Edit coalesce.toml -- enable providers, add API keys
+$EDITOR coalesce.toml
 ```
 
 ### Run
 
 ```bash
 # Start the proxy (default: http://127.0.0.1:8402)
-./target/release/agentpather serve
+./target/release/coalesce serve
 
 # Or just run directly (serve is the default command)
-./target/release/agentpather
+./target/release/coalesce
 ```
 
 ### Use
@@ -165,38 +165,38 @@ The response includes routing metadata in the `x_coalesce` field:
 
 ```bash
 # Start the proxy server
-agentpather serve
-agentpather serve --port 9000 --host 0.0.0.0
+coalesce serve
+coalesce serve --port 9000 --host 0.0.0.0
 
 # List all available models across providers
-agentpather models
+coalesce models
 
 # Health check all configured providers
-agentpather doctor
+coalesce doctor
 
 # Generate default config file
-agentpather init
-agentpather init --output /etc/agentpather/config.toml
+coalesce init
+coalesce init --output /etc/coalesce/config.toml
 
 # View request statistics from the database
-agentpather stats
+coalesce stats
 
 # Load test the proxy
-agentpather bench -n 500 -c 20
-agentpather bench --routing-only              # test scoring only (no upstream calls)
-agentpather bench --target http://remote:8402
+coalesce bench -n 500 -c 20
+coalesce bench --routing-only              # test scoring only (no upstream calls)
+coalesce bench --target http://remote:8402
 
 # Global options
-agentpather --config /path/to/config.toml serve
+coalesce --config /path/to/config.toml serve
 ```
 
 ## Configuration
 
 Coalesce looks for configuration in this order:
 1. Path passed via `--config`
-2. `./agentpather.toml`
+2. `./coalesce.toml`
 3. `./config.toml`
-4. `~/.config/agentpather/config.toml`
+4. `~/.config/coalesce/config.toml`
 5. Built-in defaults (no providers, port 8402)
 
 ```toml
@@ -371,7 +371,7 @@ The gRPC API provides the same routing capabilities over **Protocol Buffers** (b
 | `ListModels`     | List available models           |
 | `Health`         | Service health check            |
 
-Proto definition: `proto/agentpather.proto`
+Proto definition: `proto/coalesce.proto`
 
 ### Transport Comparison
 
@@ -412,7 +412,7 @@ The plugin architecture is WASM-ready. Native Rust plugins are loaded at startup
 
 ### Prompt Injection Detection
 
-Coalesce scans incoming messages for prompt injection patterns before routing. Configure sensitivity in `agentpather.toml`:
+Coalesce scans incoming messages for prompt injection patterns before routing. Configure sensitivity in `coalesce.toml`:
 
 ```toml
 [sanitize]
@@ -455,16 +455,16 @@ cargo build --release
 cargo test
 
 # Run with logging
-RUST_LOG=agentpather=debug cargo run -- serve
+RUST_LOG=coalesce=debug cargo run -- serve
 ```
 
 ### Workspace Crates
 
 | Crate               | Path                         | Description                        |
 |----------------------|------------------------------|------------------------------------|
-| `agentpather-core`   | `crates/agentpather-core`    | Router, economics, providers, storage, plugins, sanitize |
-| `agentpather-proxy`  | `crates/agentpather-proxy`   | HTTP server (Axum), gRPC server (Tonic), web dashboard |
-| `agentpather-cli`    | `crates/agentpather-cli`     | CLI binary with serve, models, doctor, stats, bench |
+| `coalesce-core`   | `crates/coalesce-core`    | Router, economics, providers, storage, plugins, sanitize |
+| `coalesce-proxy`  | `crates/coalesce-proxy`   | HTTP server (Axum), gRPC server (Tonic), web dashboard |
+| `coalesce-cli`    | `crates/coalesce-cli`     | CLI binary with serve, models, doctor, stats, bench |
 | desktop (Tauri)      | `desktop/src-tauri`          | Tauri 2 desktop app with system tray |
 
 ### Key Dependencies

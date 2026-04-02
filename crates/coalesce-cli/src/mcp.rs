@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::io::{self, BufRead, Write};
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
-const SERVER_NAME: &str = "agentpather";
+const SERVER_NAME: &str = "coalesce";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // --- JSON-RPC 2.0 types ---
@@ -42,7 +42,7 @@ fn tool_definitions() -> Value {
         "tools": [
             {
                 "name": "route_request",
-                "description": "Route a prompt through AgentPather's scoring engine. Returns the quality tier (Simple/Medium/Complex/Reasoning), confidence score, dimension breakdown, and ranked candidate models sorted by cost.",
+                "description": "Route a prompt through Coalesce's scoring engine. Returns the quality tier (Simple/Medium/Complex/Reasoning), confidence score, dimension breakdown, and ranked candidate models sorted by cost.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -60,7 +60,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "chat",
-                "description": "Send a chat completion request through AgentPather's routing proxy. The proxy automatically selects the best model based on prompt complexity and cost optimization.",
+                "description": "Send a chat completion request through Coalesce's routing proxy. The proxy automatically selects the best model based on prompt complexity and cost optimization.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -124,7 +124,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "get_health",
-                "description": "Quick health check of the AgentPather proxy. Returns provider count, model count, circuit breaker states, and dedup cache info.",
+                "description": "Quick health check of the Coalesce proxy. Returns provider count, model count, circuit breaker states, and dedup cache info.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}

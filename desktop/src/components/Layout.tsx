@@ -52,7 +52,7 @@ export default function Layout({ activeTab, onTabChange, themeMode, onThemeModeC
             AP
           </div>
           <div>
-            <h1 className="text-sm font-semibold">AgentPather</h1>
+            <h1 className="text-sm font-semibold">Coalesce</h1>
             <p className="text-xs text-secondary">LLM Router</p>
           </div>
         </div>

@@ -54,11 +54,11 @@ impl AppConfig {
 
         // Search default locations
         let search_paths = vec![
-            PathBuf::from("agentpather.toml"),
+            PathBuf::from("coalesce.toml"),
             PathBuf::from("config.toml"),
             dirs::config_dir()
                 .unwrap_or_default()
-                .join("agentpather")
+                .join("coalesce")
                 .join("config.toml"),
         ];
 
@@ -85,7 +85,7 @@ impl AppConfig {
 
     /// Write a default config file as a template
     pub fn write_default(path: &PathBuf) -> anyhow::Result<()> {
-        let template = r#"# AgentPather Configuration
+        let template = r#"# Coalesce Configuration
 
 [server]
 port = 8402

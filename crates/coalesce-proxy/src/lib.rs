@@ -1,21 +1,21 @@
 pub mod grpc;
 
-use agentpather_core::cache::dedup::{DedupAction, DedupResult, RequestDedup};
-use agentpather_core::cache::semantic::SemanticCache;
-use agentpather_core::economics::budget::BudgetTracker;
-use agentpather_core::config::{AppConfig, ProviderConfig};
-use agentpather_core::economics::billing::BillingType;
-use agentpather_core::economics::marginal_cost::MarginalCost;
-use agentpather_core::economics::optimizer::EconomicsEngine;
-use agentpather_core::providers::anthropic::AnthropicProvider;
-use agentpather_core::providers::copilot::CopilotProvider;
-use agentpather_core::providers::health::CircuitBreaker;
-use agentpather_core::providers::ollama::OllamaProvider;
-use agentpather_core::providers::openai_compat::factories;
-use agentpather_core::providers::openrouter::OpenRouterProvider;
-use agentpather_core::providers::Provider;
-use agentpather_core::storage::{RequestLogEntry, Storage};
-use agentpather_core::types::{ChatRequest, Message, MessageContent, ModelInfo, QualityTier};
+use coalesce_core::cache::dedup::{DedupAction, DedupResult, RequestDedup};
+use coalesce_core::cache::semantic::SemanticCache;
+use coalesce_core::economics::budget::BudgetTracker;
+use coalesce_core::config::{AppConfig, ProviderConfig};
+use coalesce_core::economics::billing::BillingType;
+use coalesce_core::economics::marginal_cost::MarginalCost;
+use coalesce_core::economics::optimizer::EconomicsEngine;
+use coalesce_core::providers::anthropic::AnthropicProvider;
+use coalesce_core::providers::copilot::CopilotProvider;
+use coalesce_core::providers::health::CircuitBreaker;
+use coalesce_core::providers::ollama::OllamaProvider;
+use coalesce_core::providers::openai_compat::factories;
+use coalesce_core::providers::openrouter::OpenRouterProvider;
+use coalesce_core::providers::Provider;
+use coalesce_core::storage::{RequestLogEntry, Storage};
+use coalesce_core::types::{ChatRequest, Message, MessageContent, ModelInfo, QualityTier};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -48,7 +48,7 @@ struct PaginationParams {
 #[derive(Debug, Deserialize)]
 struct PlaygroundRequest {
     prompt: String,
-    weights: Option<agentpather_core::router::config::DimensionWeights>,
+    weights: Option<coalesce_core::router::config::DimensionWeights>,
 }
 
 /// Session tracking for model pinning
@@ -192,7 +192,7 @@ pub struct ProxyState {
     pub semantic_cache: SemanticCache,
     pub ollama_preload: RwLock<Vec<String>>,
     pub model_aliases: DashMap<String, String>,
-    pub model_pins: RwLock<std::collections::HashMap<agentpather_core::types::QualityTier, Vec<agentpather_core::router::config::ModelPin>>>,
+    pub model_pins: RwLock<std::collections::HashMap<coalesce_core::types::QualityTier, Vec<coalesce_core::router::config::ModelPin>>>,
     /// Provider priority (lower = tried first). Key = provider name.
     pub provider_priorities: DashMap<String, u32>,
     /// Provider pricing mode. Key = provider name, value = "subscription" or "metered".
@@ -217,9 +217,9 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
     // Initialize storage
     let data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("agentpather");
+        .join("coalesce");
     std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("agentpather.db");
+    let db_path = data_dir.join("coalesce.db");
     let storage = Storage::open(&db_path)?;
     info!("Database: {}", db_path.display());
 
@@ -299,7 +299,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
     let (event_tx, _) = broadcast::channel::<ProxyEvent>(256);
 
     // Semantic cache
-    let semantic_cache = SemanticCache::new(agentpather_core::cache::semantic::SemanticCacheConfig {
+    let semantic_cache = SemanticCache::new(coalesce_core::cache::semantic::SemanticCacheConfig {
         enabled: config.semantic_cache.enabled,
         similarity_threshold: config.semantic_cache.similarity_threshold,
         max_entries: config.semantic_cache.max_entries,
@@ -478,7 +478,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         let pins_path = data_dir.join("model_pins.json");
         if pins_path.exists() {
             if let Ok(contents) = std::fs::read_to_string(&pins_path) {
-                if let Ok(pins) = serde_json::from_str::<std::collections::HashMap<agentpather_core::types::QualityTier, Vec<agentpather_core::router::config::ModelPin>>>(&contents) {
+                if let Ok(pins) = serde_json::from_str::<std::collections::HashMap<coalesce_core::types::QualityTier, Vec<coalesce_core::router::config::ModelPin>>>(&contents) {
                     let count: usize = pins.values().map(|v| v.len()).sum();
                     info!("Loaded {} model pins across {} tiers", count, pins.len());
                     *state.model_pins.write().unwrap() = pins;
@@ -589,7 +589,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .layer(cors)
         .with_state(state);
 
-    info!("AgentPather proxy listening on {}", addr);
+    info!("Coalesce proxy listening on {}", addr);
     let listener = TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
@@ -761,7 +761,7 @@ fn parse_billing(config: &ProviderConfig) -> BillingType {
 fn persist_dynamic_provider(name: &str, config: &ProviderConfig) {
     let path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("agentpather")
+        .join("coalesce")
         .join("providers.json");
     let mut saved: std::collections::HashMap<String, ProviderConfig> = if path.exists() {
         std::fs::read_to_string(&path)
@@ -779,7 +779,7 @@ fn persist_dynamic_provider(name: &str, config: &ProviderConfig) {
 fn remove_dynamic_provider(name: &str) {
     let path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("agentpather")
+        .join("coalesce")
         .join("providers.json");
     if path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&path) {
@@ -820,7 +820,7 @@ async fn health(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value>
 
     Json(serde_json::json!({
         "status": "ok",
-        "service": "agentpather",
+        "service": "coalesce",
         "providers": state.providers.read().unwrap().len(),
         "models": state.models.read().unwrap().len(),
         "circuit_breakers": breaker_status,
@@ -838,7 +838,7 @@ async fn chat_completions(
 
     // Check for session pinning
     let session_id = headers
-        .get("x-agentpather-session")
+        .get("x-coalesce-session")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
@@ -868,8 +868,8 @@ async fn chat_completions(
                             return Response::builder()
                                 .status(StatusCode::OK)
                                 .header("Content-Type", "text/event-stream")
-                                .header("X-AgentPather-Session-Id", sid.as_str())
-                                .header("X-AgentPather-Model", &pinned_model)
+                                .header("X-Coalesce-Session-Id", sid.as_str())
+                                .header("X-Coalesce-Model", &pinned_model)
                                 .body(Body::from_stream(body_stream))
                                 .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Stream failed").into_response());
                         }
@@ -895,7 +895,7 @@ async fn chat_completions(
     }
 
     // 1. Score and route
-    let scoring = agentpather_core::router::route(&request, &state.config.routing);
+    let scoring = coalesce_core::router::route(&request, &state.config.routing);
     info!(
         tier = %scoring.tier,
         score = scoring.score,
@@ -914,7 +914,7 @@ async fn chat_completions(
 
     // Extract tenant context for multi-tenant mode
     let tenant_id = headers
-        .get("x-agentpather-tenant")
+        .get("x-coalesce-tenant")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| state.config.multi_tenant.default_tenant.clone());
@@ -968,7 +968,7 @@ async fn chat_completions(
         .collect();
 
     // Build ordered candidate list: pinned models/providers first, then cost-sorted remainder
-    let tier_pins: Vec<agentpather_core::router::config::ModelPin> = state.model_pins.read().unwrap()
+    let tier_pins: Vec<coalesce_core::router::config::ModelPin> = state.model_pins.read().unwrap()
         .get(&scoring.tier)
         .cloned()
         .unwrap_or_default();
@@ -1100,10 +1100,10 @@ async fn chat_completions(
                         .header("Content-Type", "text/event-stream")
                         .header("Cache-Control", "no-cache")
                         .header("Connection", "keep-alive")
-                        .header("X-AgentPather-Model", &selected_model.id)
-                        .header("X-AgentPather-Provider", &selected_model.provider)
-                        .header("X-AgentPather-Tier", scoring.tier.to_string())
-                        .header("X-AgentPather-Attempt", (attempt + 1).to_string())
+                        .header("X-Coalesce-Model", &selected_model.id)
+                        .header("X-Coalesce-Provider", &selected_model.provider)
+                        .header("X-Coalesce-Tier", scoring.tier.to_string())
+                        .header("X-Coalesce-Attempt", (attempt + 1).to_string())
                         .body(Body::from_stream(body_stream))
                         .unwrap_or_else(|_| {
                             (StatusCode::INTERNAL_SERVER_ERROR, "Stream setup failed")
@@ -1159,7 +1159,7 @@ async fn chat_completions(
                             // Inject routing metadata
                             if let Some(obj) = response_json.as_object_mut() {
                                 obj.insert(
-                                    "x_agentpather".to_string(),
+                                    "x_coalesce".to_string(),
                                     serde_json::json!({
                                         "tier": scoring.tier.to_string(),
                                         "score": scoring.score,
@@ -1201,20 +1201,20 @@ async fn chat_completions(
                             });
 
                             // Prometheus metrics
-                            metrics::counter!("agentpather_requests_total",
+                            metrics::counter!("coalesce_requests_total",
                                 "tier" => scoring.tier.to_string(),
                                 "provider" => selected_model.provider.clone(),
                                 "success" => "true"
                             ).increment(1);
-                            metrics::histogram!("agentpather_request_duration_seconds")
+                            metrics::histogram!("coalesce_request_duration_seconds")
                                 .record(start.elapsed().as_secs_f64());
                             if let Some(it) = input_tokens {
-                                metrics::counter!("agentpather_tokens_total", "direction" => "input").increment(it as u64);
+                                metrics::counter!("coalesce_tokens_total", "direction" => "input").increment(it as u64);
                             }
                             if let Some(ot) = output_tokens {
-                                metrics::counter!("agentpather_tokens_total", "direction" => "output").increment(ot as u64);
+                                metrics::counter!("coalesce_tokens_total", "direction" => "output").increment(ot as u64);
                             }
-                            metrics::counter!("agentpather_cost_usd_total",
+                            metrics::counter!("coalesce_cost_usd_total",
                                 "provider" => selected_model.provider.clone()
                             ).increment(cost_val as u64);
 
@@ -1450,7 +1450,7 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Json<serde_json::V
 
 async fn stats(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
     let request_stats = state.storage.stats().unwrap_or_else(|_| {
-        agentpather_core::storage::RequestStats {
+        coalesce_core::storage::RequestStats {
             total_requests: 0,
             successful_requests: 0,
             total_cost_usd: 0.0,
@@ -1650,7 +1650,7 @@ async fn api_routing_playground(
         state.config.routing.clone()
     };
 
-    let scoring = agentpather_core::router::route(&request, &routing_config);
+    let scoring = coalesce_core::router::route(&request, &routing_config);
 
     // Build candidate rankings (same logic as chat_completions routing)
     let models_lock = state.models.read().unwrap();
@@ -1659,7 +1659,7 @@ async fn api_routing_playground(
         .map(|m| state.economics.marginal_cost(m, 1000, 500))
         .collect();
 
-    let tier_pins: Vec<agentpather_core::router::config::ModelPin> = state.model_pins.read().unwrap()
+    let tier_pins: Vec<coalesce_core::router::config::ModelPin> = state.model_pins.read().unwrap()
         .get(&scoring.tier)
         .cloned()
         .unwrap_or_default();
@@ -1786,7 +1786,7 @@ async fn api_routing_pins_set(
 ) -> Json<serde_json::Value> {
     // Accept { "pins": { "simple": [...], "complex": [...] } }
     if let Some(pins_val) = body.get("pins") {
-        match serde_json::from_value::<std::collections::HashMap<agentpather_core::types::QualityTier, Vec<agentpather_core::router::config::ModelPin>>>(pins_val.clone()) {
+        match serde_json::from_value::<std::collections::HashMap<coalesce_core::types::QualityTier, Vec<coalesce_core::router::config::ModelPin>>>(pins_val.clone()) {
             Ok(new_pins) => {
                 let count: usize = new_pins.values().map(|v| v.len()).sum();
                 *state.model_pins.write().unwrap() = new_pins.clone();
@@ -1794,7 +1794,7 @@ async fn api_routing_pins_set(
                 // Persist to disk
                 let pins_path = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("agentpather")
+                    .join("coalesce")
                     .join("model_pins.json");
                 let _ = std::fs::write(&pins_path, serde_json::to_string_pretty(&new_pins).unwrap_or_default());
 
@@ -1831,7 +1831,7 @@ async fn api_equivalences_set(
                 // For now, persist to disk and it'll load on next restart
                 let eq_path = dirs::data_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join("agentpather")
+                    .join("coalesce")
                     .join("model_equivalences.json");
                 let _ = std::fs::write(&eq_path, serde_json::to_string_pretty(&new_eq).unwrap_or_default());
 
@@ -1906,7 +1906,7 @@ async fn api_provider_priorities_set(
         }
         let prio_path = dirs::data_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("agentpather")
+            .join("coalesce")
             .join("provider_priorities.json");
         let _ = std::fs::write(&prio_path, serde_json::to_string_pretty(&save_data).unwrap_or_default());
 
@@ -1979,7 +1979,7 @@ async fn api_stats_costs(
     let daily = state.storage.costs_by_day(days).unwrap_or_default();
 
     let overall_stats = state.storage.stats().unwrap_or_else(|_| {
-        agentpather_core::storage::RequestStats {
+        coalesce_core::storage::RequestStats {
             total_requests: 0,
             successful_requests: 0,
             total_cost_usd: 0.0,
@@ -2280,7 +2280,7 @@ async fn api_copilot_auth_poll(
 
         // Save token to storage for persistence
         if let Some(dir) = dirs::data_dir() {
-            let db_path = dir.join("agentpather").join("agentpather.db");
+            let db_path = dir.join("coalesce").join("coalesce.db");
             if let Ok(storage) = Storage::open(&db_path) {
                 let _ = storage.set(&format!("{}_github_token", prov_name), &token);
             }
@@ -3006,7 +3006,7 @@ async fn api_ollama_preload(
     // Persist to disk
     let preload_path = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("agentpather")
+        .join("coalesce")
         .join("ollama_preload.json");
     let _ = std::fs::write(&preload_path, serde_json::to_string_pretty(&*preload).unwrap_or_default());
 
@@ -3463,7 +3463,7 @@ async fn api_google_auth_callback(
         <div style="text-align:center">
           <h2 style="color:#10b981">✓ Google Connected!</h2>
           <p>{model_count} Gemini models available</p>
-          <p style="color:#888">You can close this tab and return to AgentPather.</p>
+          <p style="color:#888">You can close this tab and return to Coalesce.</p>
         </div>
         <script>
           // Notify opener window

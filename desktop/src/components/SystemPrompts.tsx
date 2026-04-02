@@ -23,7 +23,7 @@ const TEMPLATE_VARS = [
   { var: "{{date}}", desc: "Current date (YYYY-MM-DD)" },
 ];
 
-const STORAGE_KEY = "agentpather-system-prompts";
+const STORAGE_KEY = "coalesce-system-prompts";
 
 function loadPrompts(): SystemPrompt[] {
   try {

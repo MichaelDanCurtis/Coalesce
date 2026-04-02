@@ -1,5 +1,5 @@
 use super::{ByteStream, Provider};
-use crate::error::{AgentPatherError, Result};
+use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, ModelInfo, QualityTier};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -87,12 +87,12 @@ impl CopilotProvider {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(AgentPatherError::Auth {
+            return Err(CoalesceError::Auth {
                 message: format!("Device flow initiation failed: {}", resp.status()),
             });
         }
 
-        let flow: DeviceFlowResponse = resp.json().await.map_err(|e| AgentPatherError::Auth {
+        let flow: DeviceFlowResponse = resp.json().await.map_err(|e| CoalesceError::Auth {
             message: format!("Failed to parse device flow response: {}", e),
         })?;
 
@@ -137,22 +137,22 @@ impl CopilotProvider {
                     continue;
                 }
                 Some("expired_token") => {
-                    return Err(AgentPatherError::Auth {
+                    return Err(CoalesceError::Auth {
                         message: "Device code expired — please restart the auth flow".into(),
                     });
                 }
                 Some("access_denied") => {
-                    return Err(AgentPatherError::Auth {
+                    return Err(CoalesceError::Auth {
                         message: "User denied authorization".into(),
                     });
                 }
                 Some(err) => {
-                    return Err(AgentPatherError::Auth {
+                    return Err(CoalesceError::Auth {
                         message: format!("OAuth error: {}", err),
                     });
                 }
                 None => {
-                    return Err(AgentPatherError::Auth {
+                    return Err(CoalesceError::Auth {
                         message: "Unexpected OAuth response".into(),
                     });
                 }
@@ -180,7 +180,7 @@ impl CopilotProvider {
     async fn refresh_copilot_token(&self) -> Result<String> {
         let github_token = {
             let state = self.token_state.read().await;
-            state.github_token.clone().ok_or_else(|| AgentPatherError::Auth {
+            state.github_token.clone().ok_or_else(|| CoalesceError::Auth {
                 message: "No GitHub token — complete device flow first".into(),
             })?
         };
@@ -190,20 +190,20 @@ impl CopilotProvider {
             .get(COPILOT_TOKEN_URL)
             .header("Authorization", format!("token {}", github_token))
             .header("Accept", "application/json")
-            .header("User-Agent", "AgentPather/0.1.0")
+            .header("User-Agent", "Coalesce/0.1.0")
             .send()
             .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Auth {
+            return Err(CoalesceError::Auth {
                 message: format!("Copilot token exchange failed ({}): {}", status, body),
             });
         }
 
         let token_resp: CopilotTokenResponse = resp.json().await.map_err(|e| {
-            AgentPatherError::Auth {
+            CoalesceError::Auth {
                 message: format!("Failed to parse Copilot token: {}", e),
             }
         })?;
@@ -254,7 +254,7 @@ impl CopilotProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             debug!("Copilot models API returned {}", status);
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: prov.to_string(),
                 message: format!("Models API failed: {}", status),
                 status: Some(status.as_u16()),
@@ -515,7 +515,7 @@ impl Provider for CopilotProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: self.provider_name.clone(),
                 message: format!("Chat failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
@@ -543,7 +543,7 @@ impl Provider for CopilotProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: self.provider_name.clone(),
                 message: format!("Stream failed ({}): {}", status, body),
                 status: Some(status.as_u16()),

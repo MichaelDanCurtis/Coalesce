@@ -1,12 +1,12 @@
-use agentpather_core::config::AppConfig;
-use agentpather_core::economics::billing::BillingType;
-use agentpather_core::economics::optimizer::EconomicsEngine;
-use agentpather_core::plugins::host::PluginHost;
-use agentpather_core::presets;
-use agentpather_core::router;
-use agentpather_core::sanitize::{validate_request, InjectionDetector, SensitivityLevel};
-use agentpather_core::storage::Storage;
-use agentpather_core::types::{ChatRequest, Message, MessageContent, ModelInfo, QualityTier};
+use coalesce_core::config::AppConfig;
+use coalesce_core::economics::billing::BillingType;
+use coalesce_core::economics::optimizer::EconomicsEngine;
+use coalesce_core::plugins::host::PluginHost;
+use coalesce_core::presets;
+use coalesce_core::router;
+use coalesce_core::sanitize::{validate_request, InjectionDetector, SensitivityLevel};
+use coalesce_core::storage::Storage;
+use coalesce_core::types::{ChatRequest, Message, MessageContent, ModelInfo, QualityTier};
 use std::collections::HashMap;
 
 fn make_request(prompt: &str) -> ChatRequest {
@@ -142,7 +142,7 @@ fn e2e_invalid_request_rejected() {
 /// Test: Storage round-trip
 #[test]
 fn e2e_storage_roundtrip() {
-    use agentpather_core::storage::RequestLogEntry;
+    use coalesce_core::storage::RequestLogEntry;
 
     let storage = Storage::in_memory().unwrap();
 

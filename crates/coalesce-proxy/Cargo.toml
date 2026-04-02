@@ -1,11 +1,11 @@
 [package]
-name = "agentpather-proxy"
+name = "coalesce-proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-agentpather-core = { workspace = true }
+coalesce-core = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

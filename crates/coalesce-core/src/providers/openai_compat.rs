@@ -1,5 +1,5 @@
 use super::{ByteStream, Provider};
-use crate::error::{AgentPatherError, Result};
+use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, ModelInfo};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -182,7 +182,7 @@ impl Provider for OpenAICompatProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: self.provider_name.clone(),
                 message: format!("Chat failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
@@ -208,7 +208,7 @@ impl Provider for OpenAICompatProvider {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(AgentPatherError::Provider {
+            return Err(CoalesceError::Provider {
                 provider: self.provider_name.clone(),
                 message: format!("Stream failed ({}): {}", status, body),
                 status: Some(status.as_u16()),
