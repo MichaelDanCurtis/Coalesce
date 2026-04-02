@@ -2,6 +2,7 @@ import type { ThemeMode, ThemeName } from "../hooks/useTheme";
 import { useTranslation } from "../i18n";
 
 const tabs = [
+  { id: "chat", labelKey: "nav.chat" },
   { id: "overview", labelKey: "nav.overview" },
   { id: "providers", labelKey: "nav.providers" },
   { id: "config", labelKey: "nav.config" },
@@ -94,7 +95,7 @@ export default function Layout({ activeTab, onTabChange, themeMode, onThemeModeC
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto p-6">{children}</main>
+      <main className={`flex-1 overflow-auto ${activeTab === "chat" ? "" : "p-6"}`}>{children}</main>
     </div>
   );
 }

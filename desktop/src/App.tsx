@@ -11,6 +11,7 @@ import RequestTimeline from "./components/RequestTimeline";
 import SystemPrompts from "./components/SystemPrompts";
 import EventStream from "./components/EventStream";
 import Settings from "./components/Settings";
+import Chat from "./components/Chat";
 import { useTheme } from "./hooks/useTheme";
 import { I18nProvider } from "./i18n";
 
@@ -20,6 +21,8 @@ function App() {
 
   const renderTab = () => {
     switch (activeTab) {
+      case "chat":
+        return <Chat />;
       case "overview":
         return <Overview />;
       case "providers":

@@ -4,6 +4,7 @@ type Locale = "en" | "zh" | "ja";
 
 const translations: Record<Locale, Record<string, string>> = {
   en: {
+    "nav.chat": "Chat",
     "nav.overview": "Overview",
     "nav.providers": "Providers",
     "nav.config": "Provider Config",
@@ -63,6 +64,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "common.offline": "Proxy Offline",
   },
   zh: {
+    "nav.chat": "聊天",
     "nav.overview": "概览",
     "nav.providers": "提供商",
     "nav.config": "提供商配置",
@@ -122,6 +124,7 @@ const translations: Record<Locale, Record<string, string>> = {
     "common.offline": "代理离线",
   },
   ja: {
+    "nav.chat": "チャット",
     "nav.overview": "概要",
     "nav.providers": "プロバイダ",
     "nav.config": "プロバイダ設定",

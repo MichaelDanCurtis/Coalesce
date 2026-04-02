@@ -34,6 +34,7 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 
 /// Maximum fallback attempts before giving up
@@ -536,7 +537,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/", get(dashboard))
         .route("/dashboard", get(dashboard))
         .route("/health", get(health))
@@ -588,6 +589,25 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/metrics", get(api_metrics))
         .layer(cors)
         .with_state(state);
+
+    // Serve the React web UI as a fallback for unmatched routes.
+    // Looks for built files in several locations:
+    //   1. ./desktop/dist (development)
+    //   2. ../desktop/dist (development from crate dir)
+    //   3. ~/.local/share/coalesce/web (installed)
+    let web_dirs = vec![
+        std::path::PathBuf::from("desktop/dist"),
+        std::path::PathBuf::from("../desktop/dist"),
+        data_dir.join("web"),
+    ];
+    if let Some(web_dir) = web_dirs.iter().find(|d| d.join("index.html").exists()) {
+        let index = web_dir.join("index.html");
+        info!("Serving web UI from {}", web_dir.display());
+        let serve = ServeDir::new(web_dir.clone()).not_found_service(ServeFile::new(index));
+        app = app.fallback_service(serve);
+    } else {
+        info!("No web UI found; embedded dashboard only at /dashboard");
+    }
 
     info!("Coalesce proxy listening on {}", addr);
     let listener = TcpListener::bind(&addr).await?;
