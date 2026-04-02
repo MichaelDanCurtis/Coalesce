@@ -67,7 +67,7 @@ jobs:
         with:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
-          releaseName: "HyperRouter ${{ github.ref_name }}"
+          releaseName: "Coalesce ${{ github.ref_name }}"
           releaseBody: "See the assets below for download links."
           releaseDraft: true
           prerelease: false
