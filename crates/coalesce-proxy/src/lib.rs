@@ -16,8 +16,9 @@ use coalesce_core::providers::ollama::OllamaProvider;
 use coalesce_core::providers::openai_compat::factories;
 use coalesce_core::providers::openrouter::OpenRouterProvider;
 use coalesce_core::providers::Provider;
+use coalesce_core::rosetta::RosettaContext;
 use coalesce_core::storage::{RequestLogEntry, Storage};
-use coalesce_core::types::{ChatRequest, ContentPart, Message, MessageContent, ModelInfo, QualityTier};
+use coalesce_core::types::{ChatRequest, ContentPart, Message, MessageContent, ModelInfo, QualityTier, derive_canonical_family};
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -207,6 +208,8 @@ pub struct ProxyState {
     pub disabled_models: DashMap<String, bool>,
     /// Auto-failover rules engine
     pub rules: rules::RulesEngine,
+    /// Rosetta: canonical tool types, equivalence classes, capability-aware routing
+    pub rosetta: RosettaContext,
 }
 
 impl ProxyState {
@@ -359,6 +362,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         disabled_providers: DashMap::new(),
         disabled_models: DashMap::new(),
         rules: rules::RulesEngine::new(),
+        rosetta: RosettaContext::new(),
     });
 
     // Load disabled providers/models from DB
@@ -563,6 +567,14 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         }
     }
 
+    // Apply model overrides from DB
+    apply_all_overrides(&state);
+    if let Ok(overrides) = state.storage.get_all_model_overrides() {
+        if !overrides.is_empty() {
+            info!("Applied {} model overrides", overrides.len());
+        }
+    }
+
     // Spawn periodic cleanup task (dedup + sessions)
     let cleanup_state = state.clone();
     tokio::spawn(async move {
@@ -677,6 +689,9 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/rules/presets", get(api_rules_presets))
         .route("/api/v1/rules/{id}", put(api_rules_update).delete(api_rules_delete))
         .route("/api/v1/rules/{id}/toggle", post(api_rules_toggle))
+        // Model overrides
+        .route("/api/v1/overrides", get(api_overrides_list))
+        .route("/api/v1/overrides/{provider}/{model}", get(api_overrides_get).put(api_overrides_set).delete(api_overrides_clear))
         .route("/metrics", get(api_metrics))
         .layer(cors)
         .with_state(state);
@@ -1001,6 +1016,11 @@ async fn chat_completions(
         }
     }
 
+    // 0. Rosetta ingress: normalize tools to canonical form
+    let normalized_tools = request.tools.as_ref().map(|tools| {
+        state.rosetta.normalize_request_tools(tools, request.tool_choice.as_ref())
+    });
+
     // 1. Score and route
     let scoring = coalesce_core::router::route(&request, &state.config.routing);
     info!(
@@ -1094,6 +1114,15 @@ async fn chat_completions(
             if has_images { m.vision } else { true }
         })
         .collect();
+
+    // 4a. Rosetta: filter candidates by tool capabilities
+    if let Some(ref nt) = normalized_tools {
+        let has_thinking = request.extra.contains_key("thinking")
+            || request.extra.contains_key("reasoning_effort");
+        candidates.retain(|(_, m)| {
+            state.rosetta.filter_by_tool_capabilities(&m.provider, nt, has_thinking).passes
+        });
+    }
 
     // 4b. Evaluate failover rules and apply triggered actions
     let rule_actions = {
@@ -1267,6 +1296,26 @@ async fn chat_completions(
         }
     });
 
+    // Family-aware dedup: within each canonical family, keep only the best (first-sorted) candidate.
+    // This ensures the fallback chain tries different families rather than the same model on
+    // different providers (e.g., Claude Opus on copilot then Claude Opus on google).
+    {
+        let mut seen_families: std::collections::HashSet<String> = std::collections::HashSet::new();
+        candidates.retain(|(_, m)| {
+            let family = m.canonical_family.clone()
+                .unwrap_or_else(|| derive_canonical_family(&m.id));
+            // Always keep pinned candidates (they were sorted to the front)
+            let canon = state.canonical_model_id(&m.id);
+            let is_pinned = pin_ranks.iter().any(|(mid, prov, _)| mid == &canon && prov == &m.provider);
+            if is_pinned {
+                seen_families.insert(family);
+                true
+            } else {
+                seen_families.insert(family.clone())
+            }
+        });
+    }
+
     if candidates.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1321,6 +1370,18 @@ async fn chat_completions(
         // Rewrite model in request
         let mut forwarded_request = request.clone();
         forwarded_request.model = selected_model.id.clone();
+
+        // Rosetta egress: translate tools to provider-native format
+        if let Some(ref nt) = normalized_tools {
+            if let Ok(translated) = state.rosetta.translate_tools_for_provider(&selected_model.provider, nt) {
+                forwarded_request.tools = Some(translated);
+            }
+            if let Some(ref tc) = nt.tool_choice {
+                forwarded_request.tool_choice = Some(
+                    state.rosetta.translate_tool_choice_for_provider(&selected_model.provider, tc)
+                );
+            }
+        }
 
         // 6. Forward — streaming or non-streaming
         if request.stream {
@@ -1725,6 +1786,8 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Json<serde_json::V
                 "reasoning": m.reasoning,
                 "vision": m.vision,
                 "tool_calling": m.tool_calling,
+                "canonical_family": m.canonical_family,
+                "capabilities": m.capabilities,
                 "pricing": {
                     "input_per_m": m.input_price_per_m,
                     "output_per_m": m.output_price_per_m,
@@ -2603,6 +2666,8 @@ async fn api_provider_refresh(
             let mut models = state.models.write().unwrap();
             models.retain(|m| m.provider != name);
             models.extend(new_models);
+            drop(models); // release lock before applying overrides
+            apply_all_overrides(&state);
             info!(provider = %name, count, "Refreshed models from API");
             Json(serde_json::json!({
                 "ok": true,
@@ -3750,25 +3815,31 @@ async fn discover_google_models(token: &str) -> Vec<ModelInfo> {
     let mut models = vec![
         ModelInfo { id: "gemini-3-flash".into(), name: "Gemini 3 Flash".into(), provider: p.into(),
             input_price_per_m: 0.10, output_price_per_m: 0.40, context_window: 1048576,
-            max_output: Some(65536), quality_tier: QualityTier::Medium, reasoning: false, vision: true, tool_calling: true },
+            max_output: Some(65536), quality_tier: QualityTier::Medium, reasoning: false, vision: true, tool_calling: true,
+            canonical_family: Some("gemini-3-flash".into()), capabilities: None },
         ModelInfo { id: "gemini-3.1-pro-low".into(), name: "Gemini 3.1 Pro (Low)".into(), provider: p.into(),
             input_price_per_m: 1.25, output_price_per_m: 5.0, context_window: 1048576,
-            max_output: Some(65536), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true },
+            max_output: Some(65536), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true,
+            canonical_family: Some("gemini-3.1-pro".into()), capabilities: None },
     ];
     if tier == "pro" || tier == "ultra" {
         models.extend(vec![
             ModelInfo { id: "gemini-3.1-pro-high".into(), name: "Gemini 3.1 Pro (High)".into(), provider: p.into(),
                 input_price_per_m: 1.25, output_price_per_m: 10.0, context_window: 1048576,
-                max_output: Some(65536), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true },
+                max_output: Some(65536), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true,
+                canonical_family: Some("gemini-3.1-pro".into()), capabilities: None },
             ModelInfo { id: "claude-sonnet-4-6-thinking".into(), name: "Claude Sonnet 4.6 (Thinking)".into(), provider: p.into(),
                 input_price_per_m: 3.0, output_price_per_m: 15.0, context_window: 200000,
-                max_output: Some(16384), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true },
+                max_output: Some(16384), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true,
+                canonical_family: Some("claude-sonnet-4.6".into()), capabilities: None },
             ModelInfo { id: "claude-opus-4-6-thinking".into(), name: "Claude Opus 4.6 (Thinking)".into(), provider: p.into(),
                 input_price_per_m: 15.0, output_price_per_m: 75.0, context_window: 200000,
-                max_output: Some(16384), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true },
+                max_output: Some(16384), quality_tier: QualityTier::Reasoning, reasoning: true, vision: true, tool_calling: true,
+                canonical_family: Some("claude-opus-4.6".into()), capabilities: None },
             ModelInfo { id: "gpt-oss-120b-medium".into(), name: "GPT-OSS 120B (Medium)".into(), provider: p.into(),
                 input_price_per_m: 1.0, output_price_per_m: 4.0, context_window: 128000,
-                max_output: Some(16384), quality_tier: QualityTier::Medium, reasoning: false, vision: true, tool_calling: true },
+                max_output: Some(16384), quality_tier: QualityTier::Medium, reasoning: false, vision: true, tool_calling: true,
+                canonical_family: Some(derive_canonical_family("gpt-oss-120b-medium")), capabilities: None },
         ]);
     }
     models
@@ -5205,6 +5276,127 @@ async fn api_export_costs_csv(
         .header("Content-Disposition", "attachment; filename=\"coalesce-costs.csv\"")
         .body(Body::from(csv))
         .unwrap()
+}
+
+// --- Model Overrides API ---
+
+/// Apply stored overrides to a ModelInfo in place
+fn apply_overrides_to_model(model: &mut ModelInfo, overrides: &[(String, String)]) {
+    for (field, value) in overrides {
+        match field.as_str() {
+            "quality_tier" => {
+                if let Some(tier) = match value.to_lowercase().as_str() {
+                    "simple" => Some(QualityTier::Simple),
+                    "medium" => Some(QualityTier::Medium),
+                    "complex" => Some(QualityTier::Complex),
+                    "reasoning" => Some(QualityTier::Reasoning),
+                    _ => None,
+                } {
+                    model.quality_tier = tier;
+                }
+            }
+            "reasoning" => model.reasoning = value == "true",
+            "vision" => model.vision = value == "true",
+            "tool_calling" => model.tool_calling = value == "true",
+            "canonical_family" => model.canonical_family = Some(value.clone()),
+            "input_price_per_m" => {
+                if let Ok(v) = value.parse::<f64>() { model.input_price_per_m = v; }
+            }
+            "output_price_per_m" => {
+                if let Ok(v) = value.parse::<f64>() { model.output_price_per_m = v; }
+            }
+            "context_window" => {
+                if let Ok(v) = value.parse::<u32>() { model.context_window = v; }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Load all overrides from DB and apply to the current model list
+fn apply_all_overrides(state: &ProxyState) {
+    if let Ok(all_overrides) = state.storage.get_all_model_overrides() {
+        let mut models = state.models.write().unwrap();
+        for model in models.iter_mut() {
+            let relevant: Vec<(String, String)> = all_overrides.iter()
+                .filter(|o| o.provider == model.provider && o.model_id == model.id)
+                .map(|o| (o.field.clone(), o.value.clone()))
+                .collect();
+            if !relevant.is_empty() {
+                apply_overrides_to_model(model, &relevant);
+            }
+        }
+    }
+}
+
+/// GET /api/v1/overrides — list all overrides
+async fn api_overrides_list(
+    State(state): State<Arc<ProxyState>>,
+) -> Json<serde_json::Value> {
+    match state.storage.get_all_model_overrides() {
+        Ok(overrides) => Json(serde_json::json!({ "overrides": overrides })),
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+/// GET /api/v1/overrides/:provider/:model — get overrides for a model
+async fn api_overrides_get(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath((provider, model)): AxumPath<(String, String)>,
+) -> Json<serde_json::Value> {
+    match state.storage.get_model_overrides(&provider, &model) {
+        Ok(overrides) => {
+            let map: serde_json::Map<String, serde_json::Value> = overrides.into_iter()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect();
+            Json(serde_json::json!({ "provider": provider, "model_id": model, "overrides": map }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
+}
+
+#[derive(Deserialize)]
+struct OverrideSetRequest {
+    overrides: std::collections::HashMap<String, String>,
+}
+
+/// PUT /api/v1/overrides/:provider/:model — set overrides (merge)
+async fn api_overrides_set(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath((provider, model)): AxumPath<(String, String)>,
+    Json(body): Json<OverrideSetRequest>,
+) -> Json<serde_json::Value> {
+    let valid_fields = ["quality_tier", "reasoning", "vision", "tool_calling",
+                        "canonical_family", "input_price_per_m", "output_price_per_m", "context_window"];
+
+    for (field, value) in &body.overrides {
+        if !valid_fields.contains(&field.as_str()) {
+            return Json(serde_json::json!({ "error": format!("Invalid field: {}", field) }));
+        }
+        if let Err(e) = state.storage.set_model_override(&provider, &model, field, value) {
+            return Json(serde_json::json!({ "error": e.to_string() }));
+        }
+    }
+
+    // Re-apply all overrides to refresh in-memory state
+    apply_all_overrides(&state);
+
+    Json(serde_json::json!({ "ok": true, "fields_set": body.overrides.len() }))
+}
+
+/// DELETE /api/v1/overrides/:provider/:model — clear all overrides for a model
+async fn api_overrides_clear(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath((provider, model)): AxumPath<(String, String)>,
+) -> Json<serde_json::Value> {
+    match state.storage.clear_model_overrides(&provider, &model) {
+        Ok(count) => {
+            // Re-apply remaining overrides
+            apply_all_overrides(&state);
+            Json(serde_json::json!({ "ok": true, "removed": count }))
+        }
+        Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
+    }
 }
 
 #[cfg(test)]

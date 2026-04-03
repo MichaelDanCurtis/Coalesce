@@ -424,4 +424,31 @@ export const api = {
       `/api/v1/harnesses/${id}/restore`, {}
     );
   },
+
+  // --- Model Overrides ---
+  async getOverrides() {
+    return httpGet<{ overrides: Array<{ provider: string; model_id: string; field: string; value: string }> }>("/api/v1/overrides");
+  },
+
+  async getModelOverrides(provider: string, modelId: string) {
+    return httpGet<{ provider: string; model_id: string; overrides: Record<string, string> }>(
+      `/api/v1/overrides/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`
+    );
+  },
+
+  async setModelOverrides(provider: string, modelId: string, overrides: Record<string, string>) {
+    const resp = await fetch(
+      `${PROXY_BASE}/api/v1/overrides/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ overrides }) }
+    );
+    return resp.json();
+  },
+
+  async clearModelOverrides(provider: string, modelId: string) {
+    const resp = await fetch(
+      `${PROXY_BASE}/api/v1/overrides/${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`,
+      { method: "DELETE" }
+    );
+    return resp.json();
+  },
 };

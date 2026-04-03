@@ -1,6 +1,6 @@
 use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
-use crate::types::{ChatRequest, ModelInfo, QualityTier};
+use crate::types::{ChatRequest, ModelCapabilities, ModelInfo, QualityTier, derive_canonical_family};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -320,6 +320,8 @@ impl CopilotProvider {
                 reasoning: false,
                 vision: true,
                 tool_calling: true,
+                canonical_family: None,
+                capabilities: None,
             },
             ModelInfo {
                 id: "gpt-4o-mini".into(),
@@ -333,6 +335,8 @@ impl CopilotProvider {
                 reasoning: false,
                 vision: true,
                 tool_calling: true,
+                canonical_family: None,
+                capabilities: None,
             },
         ]
     }
@@ -455,6 +459,51 @@ fn copilot_model_info(id: &str, display_name: &str, prov: &str, item: &serde_jso
         format!("{} (Copilot)", pretty)
     };
 
+    // Extract canonical family: prefer Copilot API's capabilities.family, fall back to normalization
+    let canonical_family = item.get("capabilities")
+        .and_then(|c| c.get("family"))
+        .and_then(|f| f.as_str())
+        .map(|f| f.to_lowercase())
+        .or_else(|| Some(derive_canonical_family(id)));
+
+    // Extract rich capability details from Copilot API
+    let reasoning_effort_levels = supports
+        .and_then(|o| o.get("reasoning_effort"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+    let has_adaptive_thinking = supports
+        .and_then(|o| o.get("adaptive_thinking"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let thinking_budget = supports.and_then(|o| {
+        let min = o.get("min_thinking_budget").and_then(|v| v.as_u64()).map(|v| v as u32)?;
+        let max = o.get("max_thinking_budget").and_then(|v| v.as_u64()).map(|v| v as u32)?;
+        Some((min, max))
+    });
+
+    let supported_endpoints = item.get("supported_endpoints")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+
+    let vendor = item.get("vendor")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let model_picker_category = item.get("model_picker_category")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let capabilities = Some(ModelCapabilities {
+        reasoning_effort_levels,
+        adaptive_thinking: has_adaptive_thinking,
+        thinking_budget,
+        supported_endpoints,
+        vendor,
+        model_picker_category,
+    });
+
     ModelInfo {
         id: id.into(),
         name,
@@ -467,6 +516,8 @@ fn copilot_model_info(id: &str, display_name: &str, prov: &str, item: &serde_jso
         reasoning,
         vision: has_vision,
         tool_calling: has_tools,
+        canonical_family,
+        capabilities,
     }
 }
 

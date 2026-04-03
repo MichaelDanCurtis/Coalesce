@@ -1,6 +1,6 @@
 use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
-use crate::types::{ChatRequest, ModelInfo};
+use crate::types::{ChatRequest, ModelInfo, derive_canonical_family};
 use async_trait::async_trait;
 use reqwest::Client;
 
@@ -132,6 +132,8 @@ impl OpenAICompatProvider {
             reasoning: is_reasoning,
             vision: has_vision,
             tool_calling: true,
+            canonical_family: Some(derive_canonical_family(id)),
+            capabilities: None,
         }
     }
 }
@@ -267,7 +269,7 @@ impl Provider for OpenAICompatProvider {
 
 pub mod factories {
     use super::*;
-    use crate::types::QualityTier;
+    use crate::types::{QualityTier, derive_canonical_family};
 
     /// GLM/Zhipu AI — open.bigmodel.cn
     /// Models discovered dynamically via the /models API.
@@ -300,6 +302,8 @@ pub mod factories {
                     reasoning: true,
                     vision: true,
                     tool_calling: true,
+                    canonical_family: Some(derive_canonical_family("kimi-for-coding")),
+                    capabilities: None,
                 },
             ],
             true,
@@ -325,6 +329,8 @@ pub mod factories {
                     reasoning: false,
                     vision: false,
                     tool_calling: true,
+                    canonical_family: Some(derive_canonical_family("deepseek-chat")),
+                    capabilities: None,
                 },
                 ModelInfo {
                     id: "deepseek-reasoner".into(),
@@ -338,6 +344,8 @@ pub mod factories {
                     reasoning: true,
                     vision: false,
                     tool_calling: false,
+                    canonical_family: Some(derive_canonical_family("deepseek-reasoner")),
+                    capabilities: None,
                 },
             ],
             false,
@@ -363,6 +371,8 @@ pub mod factories {
                     reasoning: false,
                     vision: true,
                     tool_calling: true,
+                    canonical_family: Some(derive_canonical_family("gpt-4.1")),
+                    capabilities: None,
                 },
                 ModelInfo {
                     id: "gpt-4.1-mini".into(),
@@ -376,6 +386,8 @@ pub mod factories {
                     reasoning: false,
                     vision: true,
                     tool_calling: true,
+                    canonical_family: Some(derive_canonical_family("gpt-4.1-mini")),
+                    capabilities: None,
                 },
                 ModelInfo {
                     id: "o3-mini".into(),
@@ -389,6 +401,8 @@ pub mod factories {
                     reasoning: true,
                     vision: false,
                     tool_calling: true,
+                    canonical_family: Some(derive_canonical_family("o3-mini")),
+                    capabilities: None,
                 },
             ],
             true,
@@ -413,6 +427,8 @@ pub mod factories {
                 reasoning: false,
                 vision: false,
                 tool_calling: true,
+                canonical_family: Some(derive_canonical_family("grok-3")),
+                capabilities: None,
             }],
             true,
         )

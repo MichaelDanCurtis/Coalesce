@@ -45,6 +45,8 @@ fn test_model(provider: &str, id: &str, tier: QualityTier, input_price: f64) -> 
         reasoning: tier == QualityTier::Reasoning,
         vision: false,
         tool_calling: true,
+        canonical_family: None,
+        capabilities: None,
     }
 }
 

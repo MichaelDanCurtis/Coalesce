@@ -2,6 +2,7 @@ pub mod config;
 pub mod economics;
 pub mod error;
 pub mod providers;
+pub mod rosetta;
 pub mod router;
 pub mod types;
 pub mod cache;

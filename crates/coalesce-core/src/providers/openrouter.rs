@@ -1,6 +1,6 @@
 use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
-use crate::types::{ChatRequest, ModelInfo, QualityTier};
+use crate::types::{ChatRequest, ModelInfo, QualityTier, derive_canonical_family};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -232,6 +232,8 @@ fn convert_model(m: OpenRouterModel) -> Option<ModelInfo> {
         m.name
     };
 
+    let family = derive_canonical_family(&m.id);
+
     Some(ModelInfo {
         id: m.id,
         name,
@@ -244,6 +246,8 @@ fn convert_model(m: OpenRouterModel) -> Option<ModelInfo> {
         reasoning,
         vision,
         tool_calling: true, // Most OpenRouter models support tool calling
+        canonical_family: Some(family),
+        capabilities: None,
     })
 }
 

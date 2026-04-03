@@ -1,6 +1,6 @@
 use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
-use crate::types::{ChatRequest, MessageContent, ModelInfo, QualityTier};
+use crate::types::{ChatRequest, MessageContent, ModelInfo, QualityTier, derive_canonical_family};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -544,9 +544,11 @@ impl Provider for AnthropicProvider {
                 reasoning: false,
                 vision: true,
                 tool_calling: true,
+                canonical_family: Some(derive_canonical_family("claude-sonnet-4-20250514")),
+                capabilities: None,
             },
             ModelInfo {
-                id: "claude-haiku-3-5-20241022".into(),
+                id: "claude-haiku-3.5-20241022".into(),
                 name: "Claude 3.5 Haiku".into(),
                 provider: "anthropic".into(),
                 input_price_per_m: 0.80,
@@ -557,6 +559,8 @@ impl Provider for AnthropicProvider {
                 reasoning: false,
                 vision: true,
                 tool_calling: true,
+                canonical_family: Some(derive_canonical_family("claude-haiku-3.5-20241022")),
+                capabilities: None,
             },
             ModelInfo {
                 id: "claude-opus-4-20250514".into(),
@@ -570,6 +574,8 @@ impl Provider for AnthropicProvider {
                 reasoning: true,
                 vision: true,
                 tool_calling: true,
+                canonical_family: Some(derive_canonical_family("claude-opus-4-20250514")),
+                capabilities: None,
             },
         ])
     }

@@ -1,6 +1,6 @@
 use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
-use crate::types::{ChatRequest, ModelInfo, QualityTier};
+use crate::types::{ChatRequest, ModelInfo, QualityTier, derive_canonical_family};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
@@ -183,6 +183,8 @@ fn convert_ollama_model(m: OllamaModel) -> ModelInfo {
         reasoning: false,
         vision: m.name.contains("vision") || m.name.contains("llava"),
         tool_calling: m.name.contains("llama") || m.name.contains("qwen") || m.name.contains("mistral"),
+        canonical_family: Some(derive_canonical_family(&m.name)),
+        capabilities: None,
     }
 }
 

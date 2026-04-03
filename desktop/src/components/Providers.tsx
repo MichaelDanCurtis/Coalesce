@@ -38,6 +38,41 @@ export default function Providers() {
   const { data: providersData, refresh: refreshProviders } = useApi(fetchProviders);
   const [filter, setFilter] = useState("");
   const [refreshing, setRefreshing] = useState<Record<string, boolean>>({});
+  const [editingModel, setEditingModel] = useState<any>(null);
+  const [editOverrides, setEditOverrides] = useState<Record<string, string>>({});
+  const [editSaving, setEditSaving] = useState(false);
+
+  const openModelEditor = async (m: any) => {
+    setEditingModel(m);
+    try {
+      const resp = await api.getModelOverrides(m.owned_by, m.id);
+      setEditOverrides(resp.overrides || {});
+    } catch { setEditOverrides({}); }
+  };
+
+  const saveOverrides = async () => {
+    if (!editingModel) return;
+    setEditSaving(true);
+    try {
+      // Only send fields that differ from current model values
+      const toSave: Record<string, string> = { ...editOverrides };
+      await api.setModelOverrides(editingModel.owned_by, editingModel.id, toSave);
+      await refreshModels();
+      setEditingModel(null);
+    } catch (e) { console.error("Save overrides failed:", e); }
+    setEditSaving(false);
+  };
+
+  const clearOverrides = async () => {
+    if (!editingModel) return;
+    setEditSaving(true);
+    try {
+      await api.clearModelOverrides(editingModel.owned_by, editingModel.id);
+      await refreshModels();
+      setEditingModel(null);
+    } catch (e) { console.error("Clear overrides failed:", e); }
+    setEditSaving(false);
+  };
 
   const refreshProvider = async (name: string) => {
     setRefreshing(prev => ({ ...prev, [name]: true }));
@@ -215,12 +250,14 @@ export default function Providers() {
               <thead>
                 <tr className="border-b border-themed text-left text-xs text-secondary">
                   <th className="px-4 py-2">Model</th>
+                  <th className="px-4 py-2">Family</th>
                   <th className="px-4 py-2">Tier</th>
                   <th className="px-4 py-2 text-right">Input $/M</th>
                   <th className="px-4 py-2 text-right">Output $/M</th>
                   <th className="px-4 py-2 text-right">Marginal</th>
                   <th className="px-4 py-2">Features</th>
                   <th className="px-4 py-2">Status</th>
+                  <th className="px-4 py-2"></th>
                 </tr>
               </thead>
               <tbody>
@@ -233,6 +270,9 @@ export default function Providers() {
                   return (
                     <tr key={m.id} className={`border-b border-themed-faint transition-opacity duration-200 ${disabled ? "opacity-40" : ""}`}>
                       <td className="px-4 py-2 font-mono text-xs">{m.id}</td>
+                      <td className="px-4 py-2 font-mono text-xs text-secondary" title={m.canonical_family || "—"}>
+                        {m.canonical_family ? m.canonical_family.length > 20 ? m.canonical_family.slice(0, 18) + "…" : m.canonical_family : "—"}
+                      </td>
                       <td className="px-4 py-2">
                         <span className="badge-green">{m.quality_tier}</span>
                       </td>
@@ -283,6 +323,17 @@ export default function Providers() {
                           </button>
                         )}
                       </td>
+                      <td className="px-2 py-2">
+                        <button
+                          onClick={() => openModelEditor(m)}
+                          className="cursor-pointer text-secondary hover:text-primary transition-colors"
+                          title="Edit model overrides"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                          </svg>
+                        </button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -291,6 +342,135 @@ export default function Providers() {
           </div>
         </div>
       ))}
+      {/* Model Override Editor Modal */}
+      {editingModel && (
+        <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center" onClick={() => setEditingModel(null)}>
+          <div className="card rounded-xl shadow-2xl w-[480px] max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b border-themed">
+              <h3 className="text-lg font-semibold">Edit Model</h3>
+              <p className="text-xs text-secondary font-mono mt-1">{editingModel.owned_by} / {editingModel.id}</p>
+              {editingModel.canonical_family && (
+                <p className="text-xs text-secondary mt-0.5">Family: <span className="text-primary">{editingModel.canonical_family}</span></p>
+              )}
+            </div>
+            <div className="p-5 space-y-4">
+              {/* Quality Tier */}
+              <div>
+                <label className="block text-xs text-secondary mb-1">Quality Tier</label>
+                <select
+                  value={editOverrides.quality_tier ?? ""}
+                  onChange={e => setEditOverrides(p => e.target.value ? { ...p, quality_tier: e.target.value } : (() => { const n = { ...p }; delete n.quality_tier; return n; })())}
+                  className="w-full rounded-lg border border-themed bg-tertiary px-3 py-1.5 text-sm"
+                >
+                  <option value="">Default ({editingModel.quality_tier})</option>
+                  <option value="simple">Simple</option>
+                  <option value="medium">Medium</option>
+                  <option value="complex">Complex</option>
+                  <option value="reasoning">Reasoning</option>
+                </select>
+              </div>
+
+              {/* Boolean toggles */}
+              {["reasoning", "vision", "tool_calling"].map(field => {
+                const current = editingModel[field] ? "true" : "false";
+                const label = field === "tool_calling" ? "Tool Calling" : field.charAt(0).toUpperCase() + field.slice(1);
+                return (
+                  <div key={field} className="flex items-center justify-between">
+                    <label className="text-sm">{label}</label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-secondary">({current})</span>
+                      <select
+                        value={editOverrides[field] ?? ""}
+                        onChange={e => setEditOverrides(p => e.target.value ? { ...p, [field]: e.target.value } : (() => { const n = { ...p }; delete n[field]; return n; })())}
+                        className="rounded-lg border border-themed bg-tertiary px-2 py-1 text-sm"
+                      >
+                        <option value="">Default</option>
+                        <option value="true">Yes</option>
+                        <option value="false">No</option>
+                      </select>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Canonical Family */}
+              <div>
+                <label className="block text-xs text-secondary mb-1">Canonical Family</label>
+                <input
+                  type="text"
+                  value={editOverrides.canonical_family ?? ""}
+                  placeholder={editingModel.canonical_family || "auto-derived"}
+                  onChange={e => setEditOverrides(p => e.target.value ? { ...p, canonical_family: e.target.value } : (() => { const n = { ...p }; delete n.canonical_family; return n; })())}
+                  className="w-full rounded-lg border border-themed bg-tertiary px-3 py-1.5 text-sm font-mono"
+                />
+              </div>
+
+              {/* Pricing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-secondary mb-1">Input $/M</label>
+                  <input
+                    type="number" step="0.01"
+                    value={editOverrides.input_price_per_m ?? ""}
+                    placeholder={editingModel.pricing?.input_per_m?.toFixed(2)}
+                    onChange={e => setEditOverrides(p => e.target.value ? { ...p, input_price_per_m: e.target.value } : (() => { const n = { ...p }; delete n.input_price_per_m; return n; })())}
+                    className="w-full rounded-lg border border-themed bg-tertiary px-3 py-1.5 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-secondary mb-1">Output $/M</label>
+                  <input
+                    type="number" step="0.01"
+                    value={editOverrides.output_price_per_m ?? ""}
+                    placeholder={editingModel.pricing?.output_per_m?.toFixed(2)}
+                    onChange={e => setEditOverrides(p => e.target.value ? { ...p, output_price_per_m: e.target.value } : (() => { const n = { ...p }; delete n.output_price_per_m; return n; })())}
+                    className="w-full rounded-lg border border-themed bg-tertiary px-3 py-1.5 text-sm font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Capabilities display (read-only) */}
+              {editingModel.capabilities && (
+                <div className="text-xs text-secondary border-t border-themed pt-3 mt-3">
+                  <p className="font-medium text-primary mb-1">API Capabilities (read-only)</p>
+                  {editingModel.capabilities.vendor && <p>Vendor: {editingModel.capabilities.vendor}</p>}
+                  {editingModel.capabilities.model_picker_category && <p>Category: {editingModel.capabilities.model_picker_category}</p>}
+                  {editingModel.capabilities.reasoning_effort_levels && (
+                    <p>Reasoning efforts: {editingModel.capabilities.reasoning_effort_levels.join(", ")}</p>
+                  )}
+                  {editingModel.capabilities.thinking_budget && (
+                    <p>Thinking budget: {editingModel.capabilities.thinking_budget[0]}–{editingModel.capabilities.thinking_budget[1]} tokens</p>
+                  )}
+                  {editingModel.capabilities.supported_endpoints && (
+                    <p>Endpoints: {editingModel.capabilities.supported_endpoints.join(", ")}</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="p-4 border-t border-themed flex items-center justify-between">
+              <button
+                onClick={clearOverrides}
+                disabled={editSaving || Object.keys(editOverrides).length === 0}
+                className="text-xs text-red-400 hover:text-red-300 disabled:opacity-30 cursor-pointer"
+              >
+                Clear All Overrides
+              </button>
+              <div className="flex gap-2">
+                <button onClick={() => setEditingModel(null)} className="px-3 py-1.5 text-sm rounded-lg border border-themed hover:bg-tertiary cursor-pointer">
+                  Cancel
+                </button>
+                <button
+                  onClick={saveOverrides}
+                  disabled={editSaving || Object.keys(editOverrides).length === 0}
+                  className="px-3 py-1.5 text-sm rounded-lg bg-brand-600 hover:bg-brand-500 text-white disabled:opacity-50 cursor-pointer"
+                >
+                  {editSaving ? "Saving..." : "Save Overrides"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

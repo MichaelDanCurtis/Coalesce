@@ -73,6 +73,14 @@ impl Storage {
             CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_request_log_provider ON request_log(provider);
 
+            CREATE TABLE IF NOT EXISTS model_overrides (
+                provider   TEXT NOT NULL,
+                model_id   TEXT NOT NULL,
+                field      TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                PRIMARY KEY (provider, model_id, field)
+            );
+
             CREATE TABLE IF NOT EXISTS profiles (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL UNIQUE,
@@ -610,6 +618,72 @@ impl Storage {
         Ok(result)
     }
 
+    // --- Model Overrides ---
+
+    /// Set a per-model override (upsert). Field can be: quality_tier, reasoning, vision,
+    /// tool_calling, canonical_family, input_price_per_m, output_price_per_m.
+    pub fn set_model_override(&self, provider: &str, model_id: &str, field: &str, value: &str) -> crate::error::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO model_overrides (provider, model_id, field, value) VALUES (?1, ?2, ?3, ?4)",
+            params![provider, model_id, field, value],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a specific override
+    pub fn remove_model_override(&self, provider: &str, model_id: &str, field: &str) -> crate::error::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM model_overrides WHERE provider = ?1 AND model_id = ?2 AND field = ?3",
+            params![provider, model_id, field],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Get all overrides for a specific model
+    pub fn get_model_overrides(&self, provider: &str, model_id: &str) -> crate::error::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT field, value FROM model_overrides WHERE provider = ?1 AND model_id = ?2"
+        )?;
+        let rows = stmt.query_map(params![provider, model_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Get all overrides across all models (for bulk loading on startup)
+    pub fn get_all_model_overrides(&self) -> crate::error::Result<Vec<ModelOverride>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT provider, model_id, field, value FROM model_overrides ORDER BY provider, model_id"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ModelOverride {
+                provider: row.get(0)?,
+                model_id: row.get(1)?,
+                field: row.get(2)?,
+                value: row.get(3)?,
+            })
+        })?;
+        let mut result = Vec::new();
+        for r in rows { result.push(r?); }
+        Ok(result)
+    }
+
+    /// Remove all overrides for a model
+    pub fn clear_model_overrides(&self, provider: &str, model_id: &str) -> crate::error::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let affected = conn.execute(
+            "DELETE FROM model_overrides WHERE provider = ?1 AND model_id = ?2",
+            params![provider, model_id],
+        )?;
+        Ok(affected as u64)
+    }
+
     /// Get aggregate stats grouped by provider
     pub fn stats_by_provider(&self) -> crate::error::Result<Vec<ProviderStats>> {
         let conn = self.conn.lock().unwrap();
@@ -724,6 +798,14 @@ pub struct ProfileRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ModelOverride {
+    pub provider: String,
+    pub model_id: String,
+    pub field: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -883,5 +965,38 @@ mod tests {
         let p = storage.get_profile("development").unwrap().unwrap();
         assert_eq!(p.description, Some("v2".to_string()));
         assert!(p.config_json.contains("new"));
+    }
+
+    #[test]
+    fn test_model_overrides() {
+        let storage = Storage::in_memory().unwrap();
+
+        // Set overrides
+        storage.set_model_override("copilot", "gpt-4o", "quality_tier", "reasoning").unwrap();
+        storage.set_model_override("copilot", "gpt-4o", "vision", "false").unwrap();
+        storage.set_model_override("openai", "gpt-4.1", "canonical_family", "gpt-4.1").unwrap();
+
+        // Get per-model
+        let overrides = storage.get_model_overrides("copilot", "gpt-4o").unwrap();
+        assert_eq!(overrides.len(), 2);
+
+        // Get all
+        let all = storage.get_all_model_overrides().unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Upsert
+        storage.set_model_override("copilot", "gpt-4o", "quality_tier", "complex").unwrap();
+        let overrides = storage.get_model_overrides("copilot", "gpt-4o").unwrap();
+        let tier = overrides.iter().find(|(f, _)| f == "quality_tier").unwrap();
+        assert_eq!(tier.1, "complex");
+
+        // Remove specific
+        assert!(storage.remove_model_override("copilot", "gpt-4o", "vision").unwrap());
+        assert!(!storage.remove_model_override("copilot", "gpt-4o", "nonexistent").unwrap());
+        assert_eq!(storage.get_model_overrides("copilot", "gpt-4o").unwrap().len(), 1);
+
+        // Clear all for model
+        assert_eq!(storage.clear_model_overrides("copilot", "gpt-4o").unwrap(), 1);
+        assert_eq!(storage.get_model_overrides("copilot", "gpt-4o").unwrap().len(), 0);
     }
 }

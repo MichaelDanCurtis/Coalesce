@@ -264,6 +264,8 @@ mod tests {
             reasoning: false,
             vision: false,
             tool_calling: true,
+            canonical_family: None,
+            capabilities: None,
         }
     }
 

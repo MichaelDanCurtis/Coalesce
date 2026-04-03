@@ -12,6 +12,15 @@ export interface Provider {
   is_disabled?: boolean;
 }
 
+export interface ModelCapabilities {
+  reasoning_effort_levels?: string[];
+  adaptive_thinking?: boolean;
+  thinking_budget?: [number, number];
+  supported_endpoints?: string[];
+  vendor?: string;
+  model_picker_category?: string;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -22,6 +31,8 @@ export interface ModelInfo {
   reasoning: boolean;
   vision: boolean;
   tool_calling: boolean;
+  canonical_family?: string;
+  capabilities?: ModelCapabilities;
   pricing: {
     input_per_m: number;
     output_per_m: number;
@@ -33,6 +44,13 @@ export interface ModelInfo {
   };
   circuit_breaker: string;
   is_disabled?: boolean;
+}
+
+export interface ModelOverride {
+  provider: string;
+  model_id: string;
+  field: string;
+  value: string;
 }
 
 export interface Stats {
