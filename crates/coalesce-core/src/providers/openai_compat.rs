@@ -271,15 +271,26 @@ pub mod factories {
     use super::*;
     use crate::types::{QualityTier, derive_canonical_family};
 
-    /// GLM/Zhipu AI — api.z.ai (international) or open.bigmodel.cn (China)
-    /// Uses z.ai by default (supports coding plan subscriptions).
+    /// GLM/Zhipu AI — api.z.ai coding plan (international)
+    /// Uses the coding plan endpoint by default.
     /// Models discovered dynamically via the /models API.
     pub fn glm(api_key: String) -> OpenAICompatProvider {
         OpenAICompatProvider::new(
             "glm".into(),
-            "https://api.z.ai/api/paas/v4".into(),
+            "https://api.z.ai/api/coding/paas/v4".into(),
             api_key,
             vec![],  // No hardcoded models — fully dynamic
+            true,
+        )
+    }
+
+    /// GLM/Zhipu AI — api.z.ai general (non-coding) endpoint
+    pub fn glm_general(api_key: String) -> OpenAICompatProvider {
+        OpenAICompatProvider::new(
+            "glm".into(),
+            "https://api.z.ai/api/paas/v4".into(),
+            api_key,
+            vec![],
             true,
         )
     }
@@ -468,7 +479,7 @@ mod tests {
     fn test_glm_factory() {
         let provider = factories::glm("test-key".into());
         assert_eq!(provider.name(), "glm");
-        assert_eq!(provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(provider.base_url, "https://api.z.ai/api/coding/paas/v4");
         assert!(provider.known_models.is_empty()); // fully dynamic
     }
 
