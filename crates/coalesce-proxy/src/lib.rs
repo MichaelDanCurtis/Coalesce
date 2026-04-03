@@ -4546,11 +4546,24 @@ fn chat_response_to_anthropic(resp: &serde_json::Value, model: &str) -> serde_js
     })
 }
 
-/// Translate OpenAI SSE chunk to Anthropic SSE events
-fn chat_stream_chunk_to_anthropic(chunk_data: &str, block_idx: &mut usize, started: &mut bool) -> String {
+/// Translate OpenAI SSE chunk to Anthropic SSE events.
+/// Optionally uses a think-split parser to extract `<think>` tags into thinking blocks.
+fn chat_stream_chunk_to_anthropic(
+    chunk_data: &str,
+    block_idx: &mut usize,
+    started: &mut bool,
+    think_parser: Option<&std::sync::Arc<std::sync::Mutex<coalesce_core::rosetta::ThinkingSplitParser>>>,
+) -> String {
     let mut output = String::new();
 
     if chunk_data == "[DONE]" {
+        // Close any open block
+        if *block_idx > 0 || *started {
+            output.push_str(&format!(
+                "event: content_block_stop\ndata: {}\n\n",
+                serde_json::json!({"type": "content_block_stop", "index": *block_idx})
+            ));
+        }
         output.push_str("event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n");
         return output;
     }
@@ -4558,7 +4571,6 @@ fn chat_stream_chunk_to_anthropic(chunk_data: &str, block_idx: &mut usize, start
     if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(chunk_data) {
         if !*started {
             *started = true;
-            // Send message_start
             let model = chunk.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
             output.push_str(&format!(
                 "event: message_start\ndata: {}\n\n",
@@ -4576,31 +4588,146 @@ fn chat_stream_chunk_to_anthropic(chunk_data: &str, block_idx: &mut usize, start
                     }
                 })
             ));
-            // Send content_block_start
-            output.push_str(&format!(
-                "event: content_block_start\ndata: {}\n\n",
-                serde_json::json!({
-                    "type": "content_block_start",
-                    "index": 0,
-                    "content_block": {"type": "text", "text": ""}
-                })
-            ));
         }
 
         if let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) {
             if let Some(choice) = choices.first() {
                 let delta = choice.get("delta").unwrap_or(&serde_json::Value::Null);
 
-                // Text content
+                // Text content — may contain <think> tags that need splitting
                 if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
-                    output.push_str(&format!(
-                        "event: content_block_delta\ndata: {}\n\n",
-                        serde_json::json!({
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {"type": "text_delta", "text": text}
-                        })
-                    ));
+                    if let Some(parser) = think_parser {
+                        if let Ok(mut parser) = parser.lock() {
+                            let split = parser.process_chunk(text);
+
+                            // Emit thinking blocks
+                            for thinking_block in &split.thinking_completed {
+                                // Start a thinking content block
+                                output.push_str(&format!(
+                                    "event: content_block_start\ndata: {}\n\n",
+                                    serde_json::json!({
+                                        "type": "content_block_start",
+                                        "index": *block_idx,
+                                        "content_block": {"type": "thinking", "thinking": ""}
+                                    })
+                                ));
+                                output.push_str(&format!(
+                                    "event: content_block_delta\ndata: {}\n\n",
+                                    serde_json::json!({
+                                        "type": "content_block_delta",
+                                        "index": *block_idx,
+                                        "delta": {"type": "thinking_delta", "thinking": thinking_block.text}
+                                    })
+                                ));
+                                output.push_str(&format!(
+                                    "event: content_block_stop\ndata: {}\n\n",
+                                    serde_json::json!({"type": "content_block_stop", "index": *block_idx})
+                                ));
+                                *block_idx += 1;
+                            }
+
+                            // Emit regular content
+                            if !split.content.is_empty() {
+                                // Start text block if this is the first content after thinking
+                                if *block_idx > 0 && split.thinking_completed.len() > 0 {
+                                    output.push_str(&format!(
+                                        "event: content_block_start\ndata: {}\n\n",
+                                        serde_json::json!({
+                                            "type": "content_block_start",
+                                            "index": *block_idx,
+                                            "content_block": {"type": "text", "text": ""}
+                                        })
+                                    ));
+                                } else if *block_idx == 0 {
+                                    // First content block
+                                    output.push_str(&format!(
+                                        "event: content_block_start\ndata: {}\n\n",
+                                        serde_json::json!({
+                                            "type": "content_block_start",
+                                            "index": *block_idx,
+                                            "content_block": {"type": "text", "text": ""}
+                                        })
+                                    ));
+                                }
+                                output.push_str(&format!(
+                                    "event: content_block_delta\ndata: {}\n\n",
+                                    serde_json::json!({
+                                        "type": "content_block_delta",
+                                        "index": *block_idx,
+                                        "delta": {"type": "text_delta", "text": split.content}
+                                    })
+                                ));
+                            }
+                        }
+                    } else {
+                        // No think parser — emit as-is
+                        if *block_idx == 0 {
+                            output.push_str(&format!(
+                                "event: content_block_start\ndata: {}\n\n",
+                                serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": 0,
+                                    "content_block": {"type": "text", "text": ""}
+                                })
+                            ));
+                        }
+                        output.push_str(&format!(
+                            "event: content_block_delta\ndata: {}\n\n",
+                            serde_json::json!({
+                                "type": "content_block_delta",
+                                "index": *block_idx,
+                                "delta": {"type": "text_delta", "text": text}
+                            })
+                        ));
+                    }
+                }
+
+                // Tool call deltas — translate to Anthropic tool_use blocks
+                if let Some(tool_calls) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
+                    for tc in tool_calls {
+                        let tc_idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        let func = tc.get("function").unwrap_or(&serde_json::Value::Null);
+
+                        // First chunk for this tool call — start a new block
+                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                            let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            // Close previous block if any
+                            if *block_idx > 0 || *started {
+                                output.push_str(&format!(
+                                    "event: content_block_stop\ndata: {}\n\n",
+                                    serde_json::json!({"type": "content_block_stop", "index": *block_idx})
+                                ));
+                            }
+                            *block_idx = tc_idx + 1; // offset by 1 for the text block
+                            output.push_str(&format!(
+                                "event: content_block_start\ndata: {}\n\n",
+                                serde_json::json!({
+                                    "type": "content_block_start",
+                                    "index": *block_idx,
+                                    "content_block": {
+                                        "type": "tool_use",
+                                        "id": id,
+                                        "name": name,
+                                        "input": {}
+                                    }
+                                })
+                            ));
+                        }
+
+                        // Arguments delta
+                        if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                            if !args.is_empty() {
+                                output.push_str(&format!(
+                                    "event: content_block_delta\ndata: {}\n\n",
+                                    serde_json::json!({
+                                        "type": "content_block_delta",
+                                        "index": *block_idx,
+                                        "delta": {"type": "input_json_delta", "partial_json": args}
+                                    })
+                                ));
+                            }
+                        }
+                    }
                 }
 
                 // Finish reason
@@ -4613,7 +4740,7 @@ fn chat_stream_chunk_to_anthropic(chunk_data: &str, block_idx: &mut usize, start
                     };
                     output.push_str(&format!(
                         "event: content_block_stop\ndata: {}\n\n",
-                        serde_json::json!({"type": "content_block_stop", "index": 0})
+                        serde_json::json!({"type": "content_block_stop", "index": *block_idx})
                     ));
                     output.push_str(&format!(
                         "event: message_delta\ndata: {}\n\n",
@@ -4636,101 +4763,42 @@ async fn anthropic_messages(
     headers: axum::http::HeaderMap,
     Json(req): Json<AnthropicMessagesRequest>,
 ) -> Response {
-    let is_stream = req.stream;
-    let requested_model = req.model.clone();
-
-    // Translate to internal ChatRequest
-    let chat_request = anthropic_to_chat_request(req);
-
-    if is_stream {
-        // Route through the same engine as chat_completions
-        let scoring = coalesce_core::router::route(&chat_request, &state.config.routing);
-        let models = state.models.read().unwrap().clone();
-
-        let mut candidates: Vec<_> = models.iter()
-            .filter(|m| m.quality_tier >= scoring.tier)
-            .filter(|m| {
-                state.circuit_breakers.get(&m.provider)
-                    .map(|cb| cb.is_available())
-                    .unwrap_or(true)
-            })
-            .filter(|m| !state.disabled_providers.contains_key(&m.provider))
-            .filter(|m| !state.disabled_models.contains_key(&format!("{}::{}", m.provider, m.id)))
-            .cloned()
-            .collect();
-
-        candidates.sort_by(|a, b| {
-            let pa = state.provider_priorities.get(&a.provider).map(|v| *v).unwrap_or(50);
-            let pb = state.provider_priorities.get(&b.provider).map(|v| *v).unwrap_or(50);
-            pa.cmp(&pb)
-        });
-
-        for model in candidates.iter().take(MAX_FALLBACK_ATTEMPTS) {
-            let provider = state.providers.read().unwrap().iter()
-                .find(|p| p.name() == model.provider)
-                .cloned();
-
-            if let Some(provider) = provider {
-                let mut forwarded = chat_request.clone();
-                forwarded.model = model.id.clone();
-                forwarded.stream = true;
-
-                if let Ok(stream) = provider.chat_stream(&forwarded).await {
-                    if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_success(); }
-
-                    // Translate the OpenAI SSE stream to Anthropic SSE format
-                    let block_idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-                    let anthropic_stream = stream.map(move |result| {
-                        result.map(|bytes| {
-                            let text = String::from_utf8_lossy(&bytes);
-                            let mut output = String::new();
-                            let mut bi = block_idx.load(std::sync::atomic::Ordering::Relaxed);
-                            let mut s = started.load(std::sync::atomic::Ordering::Relaxed);
-
-                            for line in text.lines() {
-                                if let Some(data) = line.strip_prefix("data: ") {
-                                    output.push_str(&chat_stream_chunk_to_anthropic(data, &mut bi, &mut s));
-                                }
-                            }
-
-                            block_idx.store(bi, std::sync::atomic::Ordering::Relaxed);
-                            started.store(s, std::sync::atomic::Ordering::Relaxed);
-                            bytes::Bytes::from(output)
-                        })
-                    });
-
-                    let body_stream = anthropic_stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
-                    return Response::builder()
-                        .status(StatusCode::OK)
-                        .header("Content-Type", "text/event-stream")
-                        .header("Cache-Control", "no-cache")
-                        .body(Body::from_stream(body_stream))
-                        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Stream failed").into_response());
-                }
-
-                if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_failure(); }
-            }
-        }
-
-        // All attempts failed
+    // Auth: check x-api-key or Authorization header
+    let has_auth = headers.get("x-api-key").is_some()
+        || headers.get("authorization").is_some();
+    if !has_auth {
         return Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .status(StatusCode::UNAUTHORIZED)
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_string(&serde_json::json!({
                 "type": "error",
-                "error": {"type": "overloaded_error", "message": "All providers failed"}
+                "error": {"type": "authentication_error", "message": "Missing x-api-key or Authorization header"}
             })).unwrap()))
             .unwrap();
     }
 
-    // Non-streaming path
-    let scoring_ns = coalesce_core::router::route(&chat_request, &state.config.routing);
-    let models_ns = state.models.read().unwrap().clone();
+    let is_stream = req.stream;
+    let start = std::time::Instant::now();
 
-    let mut candidates: Vec<_> = models_ns.iter()
-        .filter(|m| m.quality_tier >= scoring_ns.tier)
+    // Rosetta ingress: normalize Anthropic-format tools to canonical form
+    let normalized_tools = req.tools.as_ref().map(|tools| {
+        state.rosetta.normalize_request_tools(tools, req.tool_choice.as_ref())
+    });
+
+    // Detect thinking request
+    let has_thinking = req.extra.contains_key("thinking")
+        || req.extra.contains_key("reasoning_effort");
+
+    // Translate to internal ChatRequest
+    let chat_request = anthropic_to_chat_request(req);
+
+    // Route
+    let scoring = coalesce_core::router::route(&chat_request, &state.config.routing);
+    let models = state.models.read().unwrap().clone();
+
+    // Build candidate list with Rosetta filtering
+    let mut candidates: Vec<_> = models.iter()
+        .filter(|m| m.quality_tier.can_handle(&scoring.tier))
         .filter(|m| {
             state.circuit_breakers.get(&m.provider)
                 .map(|cb| cb.is_available())
@@ -4741,40 +4809,141 @@ async fn anthropic_messages(
         .cloned()
         .collect();
 
+    // Rosetta: filter by tool capabilities
+    if let Some(ref nt) = normalized_tools {
+        candidates.retain(|m| {
+            state.rosetta.filter_by_tool_capabilities(&m.provider, nt, has_thinking).passes
+        });
+    }
+
     candidates.sort_by(|a, b| {
         let pa = state.provider_priorities.get(&a.provider).map(|v| *v).unwrap_or(50);
         let pb = state.provider_priorities.get(&b.provider).map(|v| *v).unwrap_or(50);
         pa.cmp(&pb)
     });
 
+    let error_response = || -> Response {
+        Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "All providers failed"}
+            })).unwrap()))
+            .unwrap()
+    };
+
     for model in candidates.iter().take(MAX_FALLBACK_ATTEMPTS) {
         let provider = state.providers.read().unwrap().iter()
             .find(|p| p.name() == model.provider)
             .cloned();
 
-        if let Some(provider) = provider {
-            let mut forwarded = chat_request.clone();
-            forwarded.model = model.id.clone();
-            forwarded.stream = false;
+        let provider = match provider {
+            Some(p) => p,
+            None => continue,
+        };
 
+        let mut forwarded = chat_request.clone();
+        forwarded.model = model.id.clone();
+
+        // Rosetta egress: translate tools to provider-native format
+        if let Some(ref nt) = normalized_tools {
+            if let Ok(translated) = state.rosetta.translate_tools_for_provider(&model.provider, nt) {
+                forwarded.tools = Some(translated);
+            }
+            if let Some(ref tc) = nt.tool_choice {
+                forwarded.tool_choice = Some(
+                    state.rosetta.translate_tool_choice_for_provider(&model.provider, tc)
+                );
+            }
+        }
+
+        if is_stream {
+            forwarded.stream = true;
+            if let Ok(stream) = provider.chat_stream(&forwarded).await {
+                if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_success(); }
+
+                // Log request
+                let _ = state.storage.log_request(&RequestLogEntry {
+                    id: None, timestamp: None,
+                    tier: scoring.tier.to_string(), score: scoring.score,
+                    provider: model.provider.clone(), model: model.id.clone(),
+                    input_tokens: None, output_tokens: None, cost_usd: None,
+                    latency_ms: Some(start.elapsed().as_millis() as u64), success: true,
+                });
+
+                let block_idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let provider_name = model.provider.clone();
+                let think_parser = state.rosetta.create_think_parser(&provider_name)
+                    .map(|p| std::sync::Arc::new(std::sync::Mutex::new(p)));
+
+                let anthropic_stream = stream.map(move |result| {
+                    result.map(|bytes| {
+                        let text = String::from_utf8_lossy(&bytes);
+                        let mut output = String::new();
+                        let mut bi = block_idx.load(std::sync::atomic::Ordering::Relaxed);
+                        let mut s = started.load(std::sync::atomic::Ordering::Relaxed);
+
+                        for line in text.lines() {
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                output.push_str(&chat_stream_chunk_to_anthropic(
+                                    data, &mut bi, &mut s, think_parser.as_ref(),
+                                ));
+                            }
+                        }
+
+                        block_idx.store(bi, std::sync::atomic::Ordering::Relaxed);
+                        started.store(s, std::sync::atomic::Ordering::Relaxed);
+                        bytes::Bytes::from(output)
+                    })
+                });
+
+                let body_stream = anthropic_stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Content-Type", "text/event-stream")
+                    .header("Cache-Control", "no-cache")
+                    .body(Body::from_stream(body_stream))
+                    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Stream failed").into_response());
+            }
+        } else {
+            forwarded.stream = false;
             if let Ok(resp) = provider.chat(&forwarded).await {
                 if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_success(); }
-                let anthropic_resp = chat_response_to_anthropic(&resp, &model.id);
+
+                // Log request
+                let (it, ot, cost) = extract_usage(&resp, model);
+                let _ = state.storage.log_request(&RequestLogEntry {
+                    id: None, timestamp: None,
+                    tier: scoring.tier.to_string(), score: scoring.score,
+                    provider: model.provider.clone(), model: model.id.clone(),
+                    input_tokens: it, output_tokens: ot, cost_usd: cost,
+                    latency_ms: Some(start.elapsed().as_millis() as u64), success: true,
+                });
+
+                // Rosetta: extract thinking from provider response
+                let thinking = state.rosetta.normalize_response_thinking(&model.provider, &resp);
+                let mut anthropic_resp = chat_response_to_anthropic(&resp, &model.id);
+
+                // Inject thinking blocks into Anthropic response
+                if thinking.has_content() {
+                    if let Some(content) = anthropic_resp.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        let thinking_blocks = thinking.to_anthropic_blocks();
+                        for (i, block) in thinking_blocks.into_iter().enumerate() {
+                            content.insert(i, block);
+                        }
+                    }
+                }
+
                 return Json(anthropic_resp).into_response();
             }
-
-            if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_failure(); }
         }
+
+        if let Some(cb) = state.circuit_breakers.get(&model.provider) { cb.record_failure(); }
     }
 
-    Response::builder()
-        .status(StatusCode::SERVICE_UNAVAILABLE)
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&serde_json::json!({
-            "type": "error",
-            "error": {"type": "overloaded_error", "message": "All providers failed"}
-        })).unwrap()))
-        .unwrap()
+    error_response()
 }
 
 /// GET /metrics — Prometheus metrics endpoint
@@ -5563,7 +5732,7 @@ mod tests {
     fn test_chat_stream_chunk_done() {
         let mut block_idx = 0;
         let mut started = false;
-        let output = chat_stream_chunk_to_anthropic("[DONE]", &mut block_idx, &mut started);
+        let output = chat_stream_chunk_to_anthropic("[DONE]", &mut block_idx, &mut started, None);
         assert!(output.contains("message_stop"));
     }
 
@@ -5580,6 +5749,7 @@ mod tests {
             &serde_json::to_string(&chunk).unwrap(),
             &mut block_idx,
             &mut started,
+            None,
         );
         // Should contain message_start (first chunk) and content_block_delta
         assert!(started);

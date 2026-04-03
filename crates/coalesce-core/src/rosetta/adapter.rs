@@ -93,7 +93,7 @@ impl ProviderToolAdapter for OpenAiCompatToolAdapter {
     fn translate_tools(
         &self,
         tools: &[CanonicalTool],
-        _registry: &EquivalenceRegistry,
+        registry: &EquivalenceRegistry,
     ) -> Result<Vec<serde_json::Value>, TranslationError> {
         if tools.len() > self.capabilities.max_tools_hard_limit {
             return Err(TranslationError::TooManyTools {
@@ -101,7 +101,31 @@ impl ProviderToolAdapter for OpenAiCompatToolAdapter {
                 limit: self.capabilities.max_tools_hard_limit,
             });
         }
-        Ok(tools.iter().map(|t| t.to_openai()).collect())
+        let mut result = Vec::new();
+        for tool in tools {
+            match &tool.execution {
+                super::types::ToolExecution::ServerSide { native_provider }
+                    if native_provider != &self.name =>
+                {
+                    // Tool is server-side on another provider — try equivalence substitution
+                    if let Some(ref class_name) = tool.equivalence_class {
+                        if let Some(member) = registry.resolve_for_provider(class_name, &self.name) {
+                            // Substitute with this provider's equivalent
+                            let mut substituted = tool.clone();
+                            substituted.name = member.provider_tool_id.clone();
+                            substituted.execution = member.execution.clone();
+                            result.push(substituted.to_openai());
+                        }
+                        // If no equivalent found, skip this tool (provider can't handle it)
+                    }
+                    // No equivalence class — skip (provider can't handle this server-side tool)
+                }
+                _ => {
+                    result.push(tool.to_openai());
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn normalize_tool_calls(
@@ -203,7 +227,7 @@ impl ProviderToolAdapter for AnthropicToolAdapter {
     fn translate_tools(
         &self,
         tools: &[CanonicalTool],
-        _registry: &EquivalenceRegistry,
+        registry: &EquivalenceRegistry,
     ) -> Result<Vec<serde_json::Value>, TranslationError> {
         if tools.len() > self.capabilities.max_tools_hard_limit {
             return Err(TranslationError::TooManyTools {
@@ -211,7 +235,27 @@ impl ProviderToolAdapter for AnthropicToolAdapter {
                 limit: self.capabilities.max_tools_hard_limit,
             });
         }
-        Ok(tools.iter().map(|t| t.to_anthropic()).collect())
+        let mut result = Vec::new();
+        for tool in tools {
+            match &tool.execution {
+                super::types::ToolExecution::ServerSide { native_provider }
+                    if native_provider != "anthropic" =>
+                {
+                    if let Some(ref class_name) = tool.equivalence_class {
+                        if let Some(member) = registry.resolve_for_provider(class_name, "anthropic") {
+                            let mut substituted = tool.clone();
+                            substituted.name = member.provider_tool_id.clone();
+                            substituted.execution = member.execution.clone();
+                            result.push(substituted.to_anthropic());
+                        }
+                    }
+                }
+                _ => {
+                    result.push(tool.to_anthropic());
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn normalize_tool_calls(
@@ -423,5 +467,90 @@ mod tests {
             result.unwrap_err(),
             TranslationError::TooManyTools { count: 33, limit: 32 }
         ));
+    }
+
+    #[test]
+    fn test_equivalence_substitution_openai_compat() {
+        // Kimi adapter should substitute Anthropic's web_search with $web_search
+        let adapter = OpenAiCompatToolAdapter::new("kimi", ProviderToolCapabilities::kimi());
+        let registry = EquivalenceRegistry::new();
+
+        let tools = vec![CanonicalTool {
+            name: "web_search".into(),
+            description: "Search the web".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+            execution: super::super::types::ToolExecution::ServerSide {
+                native_provider: "anthropic".into(),
+            },
+            equivalence_class: Some("web_search".into()),
+            provider_hints: Default::default(),
+            defer_loading: false,
+        }];
+
+        let result = adapter.translate_tools(&tools, &registry).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["function"]["name"], "$web_search");
+    }
+
+    #[test]
+    fn test_equivalence_no_match_skips_tool() {
+        // Ollama has no web_search equivalent — tool should be skipped
+        let adapter = OpenAiCompatToolAdapter::new("ollama", ProviderToolCapabilities::ollama());
+        let registry = EquivalenceRegistry::new();
+
+        let tools = vec![
+            CanonicalTool {
+                name: "web_search".into(),
+                description: "Search the web".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                strict: false,
+                execution: super::super::types::ToolExecution::ServerSide {
+                    native_provider: "anthropic".into(),
+                },
+                equivalence_class: Some("web_search".into()),
+                provider_hints: Default::default(),
+                defer_loading: false,
+            },
+            CanonicalTool {
+                name: "my_tool".into(),
+                description: "A client tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                strict: false,
+                execution: super::super::types::ToolExecution::ClientSide,
+                equivalence_class: None,
+                provider_hints: Default::default(),
+                defer_loading: false,
+            },
+        ];
+
+        let result = adapter.translate_tools(&tools, &registry).unwrap();
+        // Only the client-side tool should remain
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["function"]["name"], "my_tool");
+    }
+
+    #[test]
+    fn test_anthropic_equivalence_substitution() {
+        // Anthropic adapter getting an OpenAI server-side tool with equivalence
+        let adapter = AnthropicToolAdapter::new();
+        let registry = EquivalenceRegistry::new();
+
+        let tools = vec![CanonicalTool {
+            name: "code_interpreter".into(),
+            description: "Execute code".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            strict: false,
+            execution: super::super::types::ToolExecution::ServerSide {
+                native_provider: "openai".into(),
+            },
+            equivalence_class: Some("code_execution".into()),
+            provider_hints: Default::default(),
+            defer_loading: false,
+        }];
+
+        let result = adapter.translate_tools(&tools, &registry).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["name"], "code_execution");
     }
 }

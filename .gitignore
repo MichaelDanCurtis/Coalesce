@@ -40,3 +40,4 @@ Thumbs.db
 # Planning/local
 .planning/
 clawrouter-reference/
+.playwright-mcp/

@@ -20,4 +20,4 @@ pub use thinking::{CanonicalThinking, ThinkingBlock, ThinkingSplitParser};
 pub use equivalence::{ToolEquivalenceClass, EquivalenceMember, EquivalenceRegistry};
 pub use capabilities::{ProviderToolCapabilities, ThinkingToolsSupport, ProviderQuirk, StreamingToolBehavior};
 pub use adapter::ProviderToolAdapter;
-pub use context::RosettaContext;
+pub use context::{RosettaContext, ToolScoring};

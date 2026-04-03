@@ -53,6 +53,113 @@ pub struct ToolFilterResult {
     pub cost_multiplier: f64,
 }
 
+/// Tool-derived scoring dimensions for capability-aware routing.
+/// Computed from normalized tools, used alongside text-based scoring.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ToolScoring {
+    /// Number of tools in the request.
+    pub tool_count: usize,
+    /// Average nesting depth of tool parameter schemas.
+    pub schema_complexity: f64,
+    /// Number of tools requiring strict schema enforcement.
+    pub strict_required: usize,
+    /// Whether the request hints at parallel tool calls.
+    pub parallel_calls_expected: bool,
+    /// Number of server-side tools (provider-executed).
+    pub server_tools_count: usize,
+    /// Whether thinking + tools are both requested.
+    pub thinking_plus_tools: bool,
+    /// Fraction of tools that have equivalence class coverage (0.0-1.0).
+    pub equivalence_coverage: f64,
+    /// Number of proxy-managed tools.
+    pub proxy_managed_count: usize,
+}
+
+impl ToolScoring {
+    /// Compute tool scoring dimensions from normalized tools.
+    pub fn from_normalized(normalized: &NormalizedTools, has_thinking: bool) -> Self {
+        let tool_count = normalized.tools.len();
+        let strict_required = normalized.strict_count;
+        let server_tools_count = normalized.server_side_count;
+        let thinking_plus_tools = has_thinking && tool_count > 0;
+
+        let equivalence_count = normalized.tools.iter()
+            .filter(|t| t.equivalence_class.is_some())
+            .count();
+        let equivalence_coverage = if tool_count > 0 {
+            equivalence_count as f64 / tool_count as f64
+        } else {
+            0.0
+        };
+
+        let proxy_managed_count = normalized.tools.iter()
+            .filter(|t| matches!(t.execution, super::types::ToolExecution::ProxyManaged { .. }))
+            .count();
+
+        // Schema complexity: average nesting depth across all tool schemas
+        let schema_complexity = if tool_count > 0 {
+            let total_depth: usize = normalized.tools.iter()
+                .map(|t| compute_schema_depth(&t.input_schema))
+                .sum();
+            total_depth as f64 / tool_count as f64
+        } else {
+            0.0
+        };
+
+        // Parallel calls: hinted by tool_choice=auto + multiple tools
+        let parallel_calls_expected = tool_count > 1
+            && matches!(
+                normalized.tool_choice,
+                None | Some(CanonicalToolChoice::Auto)
+            );
+
+        Self {
+            tool_count,
+            schema_complexity,
+            strict_required,
+            parallel_calls_expected,
+            server_tools_count,
+            thinking_plus_tools,
+            equivalence_coverage,
+            proxy_managed_count,
+        }
+    }
+
+    /// Compute a composite cost multiplier from tool scoring.
+    /// Values > 1.0 mean extra cost should be applied for this tool surface.
+    pub fn cost_multiplier(&self) -> f64 {
+        let mut m = 1.0_f64;
+        // Deep schemas are harder to handle correctly
+        if self.schema_complexity > 3.0 {
+            m *= 1.0 + (self.schema_complexity - 3.0) * 0.1;
+        }
+        // Low equivalence coverage means fewer fallback options
+        if self.tool_count > 0 && self.equivalence_coverage < 0.3 {
+            m *= 1.1;
+        }
+        m
+    }
+}
+
+/// Compute the maximum nesting depth of a JSON schema.
+fn compute_schema_depth(schema: &serde_json::Value) -> usize {
+    match schema {
+        serde_json::Value::Object(obj) => {
+            let mut max_child = 0;
+            if let Some(props) = obj.get("properties").and_then(|p| p.as_object()) {
+                for prop in props.values() {
+                    max_child = max_child.max(compute_schema_depth(prop));
+                }
+            }
+            if let Some(items) = obj.get("items") {
+                max_child = max_child.max(compute_schema_depth(items));
+            }
+            1 + max_child
+        }
+        _ => 0,
+    }
+}
+
 impl RosettaContext {
     pub fn new() -> Self {
         let mut adapters: HashMap<String, Arc<dyn ProviderToolAdapter>> = HashMap::new();
@@ -446,5 +553,95 @@ mod tests {
 
         // OpenAI hides reasoning — no parser needed
         assert!(ctx.create_think_parser("openai").is_none());
+    }
+
+    #[test]
+    fn test_tool_scoring_basic() {
+        let ctx = RosettaContext::new();
+        let tools = vec![
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "strict": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                            "options": {
+                                "type": "object",
+                                "properties": {
+                                    "unit": {"type": "string"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "function",
+                "function": {"name": "simple", "description": "Simple", "parameters": {"type": "object"}}
+            }),
+        ];
+
+        let normalized = ctx.normalize_request_tools(&tools, None);
+        let scoring = ToolScoring::from_normalized(&normalized, false);
+        assert_eq!(scoring.tool_count, 2);
+        assert_eq!(scoring.strict_required, 1);
+        assert!(!scoring.thinking_plus_tools);
+        assert!(scoring.parallel_calls_expected); // 2 tools, auto choice
+        assert!(scoring.schema_complexity > 0.0);
+    }
+
+    #[test]
+    fn test_tool_scoring_thinking_plus_tools() {
+        let ctx = RosettaContext::new();
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "t", "description": "t", "parameters": {"type": "object"}}
+        })];
+        let normalized = ctx.normalize_request_tools(&tools, None);
+        let scoring = ToolScoring::from_normalized(&normalized, true);
+        assert!(scoring.thinking_plus_tools);
+    }
+
+    #[test]
+    fn test_tool_scoring_empty() {
+        let normalized = NormalizedTools {
+            tools: vec![],
+            tool_choice: None,
+            strict_count: 0,
+            server_side_count: 0,
+            has_equivalence_tools: false,
+        };
+        let scoring = ToolScoring::from_normalized(&normalized, false);
+        assert_eq!(scoring.tool_count, 0);
+        assert_eq!(scoring.schema_complexity, 0.0);
+        assert!((scoring.cost_multiplier() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_schema_depth_computation() {
+        let shallow = serde_json::json!({"type": "object"});
+        assert_eq!(compute_schema_depth(&shallow), 1);
+
+        let nested = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "a": {
+                    "type": "object",
+                    "properties": {
+                        "b": {
+                            "type": "object",
+                            "properties": {
+                                "c": {"type": "string"}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(compute_schema_depth(&nested), 4);
     }
 }
