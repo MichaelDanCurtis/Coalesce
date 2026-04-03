@@ -1332,14 +1332,17 @@ async fn chat_completions(
 
     // 5. Fallback chain — try candidates in order
     let mut last_error = String::new();
-    let attempt_limit = candidates.len().min(MAX_FALLBACK_ATTEMPTS);
     // Track providers that returned auth errors (401/403) — skip them on subsequent attempts
     let mut auth_failed_providers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut attempts_made = 0usize;
 
-    for attempt in 0..attempt_limit {
-        let (_, selected_model) = candidates[attempt];
+    for candidate_idx in 0..candidates.len() {
+        if attempts_made >= MAX_FALLBACK_ATTEMPTS {
+            break;
+        }
+        let (_, selected_model) = candidates[candidate_idx];
 
-        // Skip providers that already returned auth errors in this request
+        // Skip providers that already returned auth errors — don't count as an attempt
         if auth_failed_providers.contains(&selected_model.provider) {
             continue;
         }
@@ -1351,6 +1354,9 @@ async fn chat_completions(
             Some(p) => p,
             None => continue,
         };
+
+        let attempt = attempts_made;
+        attempts_made += 1;
 
         if attempt > 0 {
             warn!(
@@ -1701,7 +1707,7 @@ async fn chat_completions(
 
     // All attempts exhausted
     error!(
-        attempts = attempt_limit,
+        attempts = attempts_made,
         last_error = %last_error,
         "All fallback attempts exhausted"
     );
@@ -1710,13 +1716,13 @@ async fn chat_completions(
         .status(StatusCode::BAD_GATEWAY)
         .header("Content-Type", "application/json")
         .header("x-coalesce-tier", scoring.tier.to_string())
-        .header("x-coalesce-attempt", attempt_limit.to_string())
+        .header("x-coalesce-attempt", attempts_made.to_string())
         .header("Access-Control-Expose-Headers", "x-coalesce-tier, x-coalesce-attempt")
         .body(Body::from(serde_json::to_string(&serde_json::json!({
             "error": {
                 "message": format!(
                     "All providers failed after {} attempts. Last error: {}",
-                    attempt_limit, last_error
+                    attempts_made, last_error
                 ),
                 "type": "all_providers_exhausted",
                 "code": "provider_error",
