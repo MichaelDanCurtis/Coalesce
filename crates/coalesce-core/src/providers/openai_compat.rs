@@ -271,14 +271,27 @@ pub mod factories {
     use super::*;
     use crate::types::{QualityTier, derive_canonical_family};
 
-    /// GLM/Zhipu AI — open.bigmodel.cn
+    /// GLM/Zhipu AI — api.z.ai (international) or open.bigmodel.cn (China)
+    /// Uses z.ai by default (supports coding plan subscriptions).
     /// Models discovered dynamically via the /models API.
     pub fn glm(api_key: String) -> OpenAICompatProvider {
         OpenAICompatProvider::new(
             "glm".into(),
-            "https://open.bigmodel.cn/api/paas/v4".into(),
+            "https://api.z.ai/api/paas/v4".into(),
             api_key,
             vec![],  // No hardcoded models — fully dynamic
+            true,
+        )
+    }
+
+    /// GLM/Zhipu AI — open.bigmodel.cn (China domestic endpoint)
+    /// Use this if your API key is from the bigmodel.cn platform.
+    pub fn glm_cn(api_key: String) -> OpenAICompatProvider {
+        OpenAICompatProvider::new(
+            "glm".into(),
+            "https://open.bigmodel.cn/api/paas/v4".into(),
+            api_key,
+            vec![],
             true,
         )
     }
@@ -455,8 +468,15 @@ mod tests {
     fn test_glm_factory() {
         let provider = factories::glm("test-key".into());
         assert_eq!(provider.name(), "glm");
-        assert_eq!(provider.base_url, "https://open.bigmodel.cn/api/paas/v4");
+        assert_eq!(provider.base_url, "https://api.z.ai/api/paas/v4");
         assert!(provider.known_models.is_empty()); // fully dynamic
+    }
+
+    #[test]
+    fn test_glm_cn_factory() {
+        let provider = factories::glm_cn("test-key".into());
+        assert_eq!(provider.name(), "glm");
+        assert_eq!(provider.base_url, "https://open.bigmodel.cn/api/paas/v4");
     }
 
     #[test]
