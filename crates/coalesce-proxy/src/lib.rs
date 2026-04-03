@@ -11,6 +11,7 @@ use coalesce_core::economics::marginal_cost::MarginalCost;
 use coalesce_core::economics::optimizer::EconomicsEngine;
 use coalesce_core::providers::anthropic::AnthropicProvider;
 use coalesce_core::providers::copilot::CopilotProvider;
+use coalesce_core::providers::google_cloudcode::GoogleCloudCodeProvider;
 use coalesce_core::providers::health::CircuitBreaker;
 use coalesce_core::providers::ollama::OllamaProvider;
 use coalesce_core::providers::openai_compat::factories;
@@ -302,12 +303,16 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
     }
 
     // Initialize providers and discover models
-    let (providers, mut models, economics, circuit_breakers) = init_providers(&config).await;
+    let (mut providers, mut models, economics, circuit_breakers) = init_providers(&config).await;
 
-    // Inject Google models discovered via Cloud Code API (since OpenAI-compat /models fails with OAuth)
-    if google_token.is_some() {
-        let google_models = discover_google_models(google_token.as_deref().unwrap()).await;
-        // Remove any empty google models from init_providers, add the real ones
+    // Inject Google Cloud Code provider and models
+    if let Some(ref token) = google_token {
+        let project_id = storage.get("google_project_id").ok().flatten().unwrap_or_default();
+        let google_provider: Arc<dyn Provider> = Arc::new(GoogleCloudCodeProvider::new(token.clone(), project_id));
+        providers.push(google_provider);
+        circuit_breakers.insert("google".into(), CircuitBreaker::new(5, 60));
+
+        let google_models = discover_google_models(token).await;
         models.retain(|m| m.provider != "google");
         for m in &google_models {
             economics.register("google", Some(&m.id), BillingType::PerToken);
@@ -386,7 +391,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         }
     }
 
-    // Initialize provider priorities and pricing modes from config
+    // Initialize provider priorities, pricing modes, and billing from config
     for (name, pconfig) in &state.config.providers {
         state.provider_priorities.insert(name.clone(), pconfig.priority);
         state.provider_pricing_modes.insert(name.clone(), pconfig.pricing_mode.clone());
@@ -435,7 +440,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
                             "openai" => api_key.map(|k| Arc::new(factories::openai(k)) as Arc<dyn Provider>),
                             "xai" | "grok" => api_key.map(|k| Arc::new(factories::xai(k)) as Arc<dyn Provider>),
                             "kimi" | "moonshot" => api_key.map(|k| Arc::new(factories::kimi(k)) as Arc<dyn Provider>),
-                            "google" | "gemini" => api_key.map(|k| Arc::new(factories::google(k)) as Arc<dyn Provider>),
+                            "google" | "gemini" => api_key.map(|k| build_google_provider(k, &state.storage)),
                             _ => None,
                         };
                         if let Some(p) = provider {
@@ -586,6 +591,39 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
             cleanup_state.sessions.retain(|_, s| {
                 s.last_seen.elapsed().as_secs() < SESSION_TIMEOUT_SECS
             });
+        }
+    });
+
+    // Spawn Google OAuth token refresh loop (tokens expire after ~1 hour)
+    let google_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(45 * 60));
+        interval.tick().await; // skip immediate tick
+        loop {
+            interval.tick().await;
+            // Check if we have a refresh token
+            let refresh_token = google_state.storage.get("google_refresh_token").ok().flatten();
+            if let Some(rt) = refresh_token {
+                match refresh_google_token(&rt).await {
+                    Ok(new_token) => {
+                        let _ = google_state.storage.set("google_access_token", &new_token);
+                        // Replace the Google provider with a fresh one
+                        let new_provider: Arc<dyn Provider> = Arc::new(
+                            GoogleCloudCodeProvider::new(new_token.clone(), google_state.storage.get("google_project_id").ok().flatten().unwrap_or_default())
+                        );
+                        let mut providers = google_state.providers.write().unwrap();
+                        if let Some(pos) = providers.iter().position(|p| p.name() == "google") {
+                            providers[pos] = new_provider;
+                            info!("  google — background token refresh succeeded");
+                        }
+                        // Also update config so new provider instances use fresh token
+                        drop(providers);
+                    }
+                    Err(e) => {
+                        warn!("  google — background token refresh failed: {}", e);
+                    }
+                }
+            }
         }
     });
 
@@ -769,7 +807,9 @@ async fn init_providers(
             "openai" => api_key.map(|k| Arc::new(factories::openai(k)) as Arc<dyn Provider>),
             "xai" | "grok" => api_key.map(|k| Arc::new(factories::xai(k)) as Arc<dyn Provider>),
             "google" | "gemini" => {
-                api_key.map(|k| Arc::new(factories::google(k)) as Arc<dyn Provider>)
+                // Google Cloud Code uses a custom provider, initialized separately
+                // after init_providers with project_id from storage
+                None
             }
             other => {
                 warn!("Unknown provider: {}", other);
@@ -1017,16 +1057,22 @@ async fn chat_completions(
     }
 
     // 0. Rosetta ingress: normalize tools to canonical form
+    let t0 = Instant::now();
     let normalized_tools = request.tools.as_ref().map(|tools| {
         state.rosetta.normalize_request_tools(tools, request.tool_choice.as_ref())
     });
+    let rosetta_ms = t0.elapsed().as_millis();
 
     // 1. Score and route
+    let t1 = Instant::now();
     let scoring = coalesce_core::router::route(&request, &state.config.routing);
+    let route_ms = t1.elapsed().as_millis();
     info!(
         tier = %scoring.tier,
         score = scoring.score,
         reasoning = %scoring.reasoning,
+        rosetta_ms = rosetta_ms,
+        route_ms = route_ms,
         "Routing request"
     );
 
@@ -1053,10 +1099,13 @@ async fn chat_completions(
     };
 
     // 2. Compute marginal costs for all models
+    let t2 = Instant::now();
     let costs: Vec<MarginalCost> = models_snapshot
         .iter()
         .map(|m| state.economics.marginal_cost(m, 1000, 500))
         .collect();
+    let econ_ms = t2.elapsed().as_millis();
+    info!(models = models_snapshot.len(), econ_ms = econ_ms, "Economics computed");
 
     // 3. Get routing strategy
     let _strategy = state
@@ -1331,6 +1380,8 @@ async fn chat_completions(
     }
 
     // 5. Fallback chain — try candidates in order
+    let pre_fallback_ms = start.elapsed().as_millis();
+    info!(candidates = candidates.len(), pre_fallback_ms = pre_fallback_ms, "Entering fallback loop");
     let mut last_error = String::new();
     // Track providers that returned auth errors (401/403) — skip them on subsequent attempts
     let mut auth_failed_providers: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1390,6 +1441,7 @@ async fn chat_completions(
         }
 
         // 6. Forward — streaming or non-streaming
+        let provider_call_start = Instant::now();
         if request.stream {
             match provider.chat_stream(&forwarded_request).await {
                 Ok(byte_stream) => {
@@ -1470,6 +1522,24 @@ async fn chat_completions(
                     if err_str.contains("401") || err_str.contains("403") || err_str.contains("Unauthorized") || err_str.contains("Forbidden") {
                         warn!(provider = %selected_model.provider, "Auth error — skipping provider for remaining attempts");
                         auth_failed_providers.insert(selected_model.provider.clone());
+                        // Google: try reactive token refresh on auth failure
+                        if selected_model.provider == "google" {
+                            if let Ok(Some(rt)) = state.storage.get("google_refresh_token") {
+                                if let Ok(new_token) = refresh_google_token(&rt).await {
+                                    let _ = state.storage.set("google_access_token", &new_token);
+                                    let new_provider: Arc<dyn Provider> = Arc::new(
+                                        GoogleCloudCodeProvider::new(new_token, state.storage.get("google_project_id").ok().flatten().unwrap_or_default())
+                                    );
+                                    let mut providers = state.providers.write().unwrap();
+                                    if let Some(pos) = providers.iter().position(|p| p.name() == "google") {
+                                        providers[pos] = new_provider;
+                                        info!("  google — reactive token refresh succeeded, removing from auth-failed set");
+                                        drop(providers);
+                                        auth_failed_providers.remove("google");
+                                    }
+                                }
+                            }
+                        }
                     }
                     last_error = err_str;
                     continue;
@@ -1500,6 +1570,14 @@ async fn chat_completions(
                 DedupAction::Execute(guard) => {
                     match provider.chat(&forwarded_request).await {
                         Ok(mut response_json) => {
+                            let provider_call_ms = provider_call_start.elapsed().as_millis();
+                            info!(
+                                provider = %selected_model.provider,
+                                model = %selected_model.id,
+                                provider_call_ms = provider_call_ms,
+                                total_ms = start.elapsed().as_millis(),
+                                "Provider call succeeded"
+                            );
                             // Record success
                             if let Some(cb) =
                                 state.circuit_breakers.get(&selected_model.provider)
@@ -1695,6 +1773,24 @@ async fn chat_completions(
                             if err_str.contains("401") || err_str.contains("403") || err_str.contains("Unauthorized") || err_str.contains("Forbidden") {
                                 warn!(provider = %selected_model.provider, "Auth error — skipping provider for remaining attempts");
                                 auth_failed_providers.insert(selected_model.provider.clone());
+                                // Google: try reactive token refresh on auth failure
+                                if selected_model.provider == "google" {
+                                    if let Ok(Some(rt)) = state.storage.get("google_refresh_token") {
+                                        if let Ok(new_token) = refresh_google_token(&rt).await {
+                                            let _ = state.storage.set("google_access_token", &new_token);
+                                            let new_provider: Arc<dyn Provider> = Arc::new(
+                                                GoogleCloudCodeProvider::new(new_token, state.storage.get("google_project_id").ok().flatten().unwrap_or_default())
+                                            );
+                                            let mut providers = state.providers.write().unwrap();
+                                            if let Some(pos) = providers.iter().position(|p| p.name() == "google") {
+                                                providers[pos] = new_provider;
+                                                info!("  google — reactive token refresh succeeded, removing from auth-failed set");
+                                                drop(providers);
+                                                auth_failed_providers.remove("google");
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             last_error = err_str;
                             continue;
@@ -1855,7 +1951,7 @@ async fn stats(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> 
             serde_json::json!({
                 "provider": q.provider,
                 "model": q.model,
-                "billing": format!("{:?}", q.billing),
+                "billing": q.billing.to_string(),
                 "used": q.used,
                 "remaining": q.remaining(),
                 "is_depleted": q.is_depleted(),
@@ -1909,30 +2005,10 @@ async fn api_providers(State(state): State<Arc<ProxyState>>) -> Json<serde_json:
                 })
             });
 
-            // Check both config and dynamic providers for billing
-            let billing = state
-                .config
-                .providers
-                .get(&name)
-                .and_then(|pc| pc.billing.clone())
-                .or_else(|| {
-                    // Check dynamic providers.json
-                    let dp_path = dirs::data_dir()
-                        .unwrap_or_else(|| std::path::PathBuf::from("."))
-                        .join("coalesce")
-                        .join("providers.json");
-                    if dp_path.exists() {
-                        std::fs::read_to_string(&dp_path).ok()
-                            .and_then(|s| serde_json::from_str::<std::collections::HashMap<String, ProviderConfig>>(&s).ok())
-                            .and_then(|m| m.get(&name).and_then(|pc| pc.billing.clone()))
-                    } else { None }
-                })
-                .unwrap_or_else(|| {
-                    // Infer from provider type
-                    if name.starts_with("ollama") { "local".into() }
-                    else if name.starts_with("copilot") { "free".into() }
-                    else { "per_token".into() }
-                });
+            // Read billing directly from the economics engine (single source of truth)
+            let billing = state.economics.get_billing(&name)
+                .map(|bt| bt.to_string())
+                .unwrap_or_else(|| "per_token".into());
 
             let is_disabled = state.disabled_providers.contains_key(&name);
 
@@ -1989,7 +2065,7 @@ async fn api_providers_quotas(State(state): State<Arc<ProxyState>>) -> Json<serd
             serde_json::json!({
                 "provider": q.provider,
                 "model": q.model,
-                "billing": format!("{:?}", q.billing),
+                "billing": q.billing.to_string(),
                 "used": q.used,
                 "remaining": q.remaining(),
                 "is_depleted": q.is_depleted(),
@@ -2449,7 +2525,7 @@ async fn api_create_provider(
         "openai" => api_key.map(|k| Arc::new(factories::openai(k)) as Arc<dyn Provider>),
         "xai" | "grok" => api_key.map(|k| Arc::new(factories::xai(k)) as Arc<dyn Provider>),
         "kimi" | "moonshot" => api_key.map(|k| Arc::new(factories::kimi(k)) as Arc<dyn Provider>),
-        "google" | "gemini" => api_key.map(|k| Arc::new(factories::google(k)) as Arc<dyn Provider>),
+        "google" | "gemini" => api_key.map(|k| build_google_provider(k, &state.storage)),
         _ => None,
     };
 
@@ -2471,7 +2547,7 @@ async fn api_create_provider(
     state.models.write().unwrap().extend(new_models);
     state.providers.write().unwrap().push(p);
 
-    // Set default priority and pricing mode for new provider
+    // Set default priority, pricing mode, and billing for new provider
     state.provider_priorities.entry(body.name.clone()).or_insert(body.config.priority);
     state.provider_pricing_modes.entry(body.name.clone()).or_insert(body.config.pricing_mode.clone());
 
@@ -2505,7 +2581,7 @@ async fn api_update_provider(
         "openai" => api_key.map(|k| Arc::new(factories::openai(k)) as Arc<dyn Provider>),
         "xai" | "grok" => api_key.map(|k| Arc::new(factories::xai(k)) as Arc<dyn Provider>),
         "kimi" | "moonshot" => api_key.map(|k| Arc::new(factories::kimi(k)) as Arc<dyn Provider>),
-        "google" | "gemini" => api_key.map(|k| Arc::new(factories::google(k)) as Arc<dyn Provider>),
+        "google" | "gemini" => api_key.map(|k| build_google_provider(k, &state.storage)),
         _ => None,
     };
 
@@ -2556,6 +2632,22 @@ async fn api_update_billing(
     };
     let billing = parse_billing(&pconfig);
     state.economics.register(&name, None::<&str>, billing);
+
+    // Persist to providers.json so it survives restarts
+    let dp_path = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coalesce")
+        .join("providers.json");
+    if dp_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&dp_path) {
+            if let Ok(mut saved) = serde_json::from_str::<std::collections::HashMap<String, ProviderConfig>>(&contents) {
+                saved.entry(name.clone()).and_modify(|pc| pc.billing = Some(billing_str.to_string()))
+                    .or_insert_with(|| ProviderConfig { billing: Some(billing_str.to_string()), ..Default::default() });
+                let _ = std::fs::write(&dp_path, serde_json::to_string_pretty(&saved).unwrap_or_default());
+            }
+        }
+    }
+
     info!("Updated billing for '{}' to '{}'", name, billing_str);
     Json(serde_json::json!({"status": "ok", "provider": name, "billing": billing_str}))
 }
@@ -3754,6 +3846,12 @@ async fn validate_google_token(token: &str) -> bool {
         .is_ok_and(|r| r.status().is_success())
 }
 
+/// Build a Google Cloud Code provider, reading project_id from storage
+fn build_google_provider(token: String, storage: &Storage) -> Arc<dyn Provider> {
+    let project_id = storage.get("google_project_id").ok().flatten().unwrap_or_default();
+    Arc::new(GoogleCloudCodeProvider::new(token, project_id))
+}
+
 /// Read the fresh OAuth token from Antigravity's local SQLite DB
 fn read_antigravity_token() -> Option<String> {
     let home = dirs::home_dir()?;
@@ -3948,7 +4046,7 @@ async fn api_google_auth_callback(
     }
 
     // Register Google/Gemini provider
-    let google = factories::google(access_token.to_string());
+    let google = GoogleCloudCodeProvider::new(access_token.to_string(), state.storage.get("google_project_id").ok().flatten().unwrap_or_default());
     let model_count = match google.list_models().await {
         Ok(models) => {
             let count = models.len();

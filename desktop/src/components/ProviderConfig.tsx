@@ -20,7 +20,7 @@ const KNOWN_PROVIDERS: ProviderDef[] = [
   { id: "openai", label: "OpenAI", kind: "apikey", billing: "per_token", envVar: "OPENAI_API_KEY", desc: "GPT-4o, o1, o3 direct" },
   { id: "google", label: "Google Gemini", kind: "google_auth", billing: "quota_only:50:0", envVar: "GOOGLE_API_KEY", desc: "Gemini models — quota-only, stops when exhausted" },
   { id: "deepseek", label: "DeepSeek", kind: "apikey", billing: "per_token", envVar: "DEEPSEEK_API_KEY", desc: "DeepSeek V3 and R1" },
-  { id: "kimi", label: "Kimi / Moonshot", kind: "apikey", billing: "unlimited", envVar: "KIMI_API_KEY", desc: "Moonshot AI models" },
+  { id: "kimi", label: "Kimi / Moonshot", kind: "apikey", billing: "quota_only:50:0", envVar: "KIMI_API_KEY", desc: "Moonshot AI models" },
   { id: "xai", label: "xAI / Grok", kind: "apikey", billing: "per_token", envVar: "XAI_API_KEY", desc: "Grok models" },
   { id: "glm", label: "GLM / Zhipu", kind: "apikey", billing: "per_token", envVar: "GLM_API_KEY", desc: "GLM-4 and ChatGLM" },
 ];
@@ -67,69 +67,45 @@ export default function ProviderConfig() {
 
       {/* Copilot Account Priority (if multiple copilot accounts) */}
       {(() => {
-        const copilotAccounts = activeProviders.filter((p: any) => p.name === "copilot" || p.name.startsWith("copilot-"));
+        const copilotAccounts = activeProviders
+          .filter((p: any) => p.name === "copilot" || p.name.startsWith("copilot-"))
+          .sort((a: any, b: any) => (a.priority ?? 50) - (b.priority ?? 50));
         if (copilotAccounts.length > 1) {
+          const reorderCopilot = async (fromIdx: number, toIdx: number) => {
+            const reordered = [...copilotAccounts];
+            [reordered[fromIdx], reordered[toIdx]] = [reordered[toIdx], reordered[fromIdx]];
+            // Assign ascending priorities so the order is persisted
+            const updates: Record<string, { priority: number; pricing_mode: string }> = {};
+            reordered.forEach((acct: any, idx: number) => {
+              const prio = 50 + idx; // 50, 51, 52, ...
+              updates[acct.name] = { priority: prio, pricing_mode: acct.pricing_mode ?? "subscription" };
+            });
+            await api.setProviderPriorities(updates);
+            refresh();
+          };
+
           return (
             <div className="card">
               <h3 className="text-sm font-medium mb-2">Copilot Account Priority</h3>
               <p className="text-xs text-secondary mb-3">
                 When multiple Copilot accounts are available, the router tries them in this order.
-                Drag to reorder or use the arrows.
+                Use the arrows to reorder.
               </p>
               <div className="space-y-2">
                 {copilotAccounts.map((p: any, i: number) => (
                   <div key={p.name} className="flex items-center gap-2 bg-surface-alt rounded px-3 py-2">
                     <span className="text-xs font-mono text-brand-400 w-5">{i + 1}.</span>
                     <span className="text-sm flex-1">{p.name}</span>
-                    <span className="text-xs text-secondary">{p.models ?? 0} models</span>
+                    <span className="text-xs text-secondary">{p.model_count ?? 0} models</span>
                     <button
-                      onClick={() => {
-                        if (i === 0) return;
-                        const reordered = [...copilotAccounts];
-                        [reordered[i - 1], reordered[i]] = [reordered[i], reordered[i - 1]];
-                        // Update pin order for all tiers that reference copilot
-                        api.getRoutingPins().then(data => {
-                          const pins = data.pins ?? {};
-                          for (const tier of Object.keys(pins)) {
-                            for (const pin of pins[tier]) {
-                              const copilotProvs = pin.providers.filter((pr: string) => pr === "copilot" || pr.startsWith("copilot-"));
-                              if (copilotProvs.length > 1) {
-                                const nonCopilot = pin.providers.filter((pr: string) => pr !== "copilot" && !pr.startsWith("copilot-"));
-                                const orderedCopilot = reordered.map((a: any) => a.name).filter((n: string) => copilotProvs.includes(n));
-                                pin.providers = [...orderedCopilot, ...nonCopilot];
-                              }
-                            }
-                          }
-                          api.setRoutingPins(pins);
-                        });
-                        refresh();
-                      }}
+                      onClick={() => reorderCopilot(i, i - 1)}
                       disabled={i === 0}
-                      className="text-xs text-secondary hover:text-primary disabled:opacity-20"
+                      className="cursor-pointer text-xs text-secondary hover:text-primary disabled:opacity-20"
                     >{"\u25B2"}</button>
                     <button
-                      onClick={() => {
-                        if (i === copilotAccounts.length - 1) return;
-                        const reordered = [...copilotAccounts];
-                        [reordered[i], reordered[i + 1]] = [reordered[i + 1], reordered[i]];
-                        api.getRoutingPins().then(data => {
-                          const pins = data.pins ?? {};
-                          for (const tier of Object.keys(pins)) {
-                            for (const pin of pins[tier]) {
-                              const copilotProvs = pin.providers.filter((pr: string) => pr === "copilot" || pr.startsWith("copilot-"));
-                              if (copilotProvs.length > 1) {
-                                const nonCopilot = pin.providers.filter((pr: string) => pr !== "copilot" && !pr.startsWith("copilot-"));
-                                const orderedCopilot = reordered.map((a: any) => a.name).filter((n: string) => copilotProvs.includes(n));
-                                pin.providers = [...orderedCopilot, ...nonCopilot];
-                              }
-                            }
-                          }
-                          api.setRoutingPins(pins);
-                        });
-                        refresh();
-                      }}
+                      onClick={() => reorderCopilot(i, i + 1)}
                       disabled={i === copilotAccounts.length - 1}
-                      className="text-xs text-secondary hover:text-primary disabled:opacity-20"
+                      className="cursor-pointer text-xs text-secondary hover:text-primary disabled:opacity-20"
                     >{"\u25BC"}</button>
                   </div>
                 ))}
@@ -191,8 +167,10 @@ function ActiveProviderCard({ provider: p, breaker: cb, onRemoved }: {
   const updateSettings = async (newPriority: number, newBilling: string) => {
     setPriority(newPriority);
     setBilling(newBilling);
+    // Derive pricing_mode from billing type: quota/free/local/unlimited = subscription, per_token = metered
+    const pricingMode = (newBilling === "per_token" || newBilling === "per-token") ? "metered" : "subscription";
     try {
-      await api.setProviderPriorities({ [p.name]: { priority: newPriority, pricing_mode: newBilling } });
+      await api.setProviderPriorities({ [p.name]: { priority: newPriority, pricing_mode: pricingMode } });
       // Update the economics engine's billing type
       await fetch(`http://127.0.0.1:8402/api/v1/providers/${p.name}/billing`, {
         method: "PUT",

@@ -19,6 +19,12 @@ impl EconomicsEngine {
         }
     }
 
+    /// Get the billing type for a provider (provider-level, not model-level).
+    pub fn get_billing(&self, provider: &str) -> Option<BillingType> {
+        let key = quota_key(provider, None::<&str>);
+        self.quotas.get(&key).map(|q| q.billing.clone())
+    }
+
     /// Register a provider's billing model.
     pub fn register(&self, provider: &str, model: Option<&str>, billing: BillingType) {
         let key = quota_key(provider, model);

@@ -9,11 +9,12 @@ function billingLabel(billing: string): string {
   if (billing === "local" || billing === "Local") return "Local (Free)";
   if (billing === "free" || billing === "FreeIncluded") return "Free";
   if (billing === "unlimited" || billing === "UnlimitedSubscription") return "Unlimited";
-  if (billing.includes("QuotaOnly")) return "Quota Only";
-  if (billing.includes("QuotaMetered")) return "Quota + Token";
-  if (billing.includes("QuotaRefreshing")) return "Quota (Refreshing)";
-  if (billing.includes("QuotaMonthly")) return "Monthly Quota";
-  if (billing.includes("FreeTierCredits")) return "Free Credits";
+  // Match both raw config strings (quota_only:50:0) and Debug format (QuotaOnly { ... })
+  if (billing.includes("QuotaOnly") || billing.startsWith("quota_only")) return "Quota Only";
+  if (billing.includes("QuotaMetered") || billing.startsWith("quota_metered")) return "Quota + Metered";
+  if (billing.includes("QuotaRefreshing") || billing.startsWith("quota_refreshing")) return "Quota (Refreshing)";
+  if (billing.includes("QuotaMonthly") || billing.startsWith("quota_monthly")) return "Monthly Quota";
+  if (billing.includes("FreeTierCredits") || billing.startsWith("free_credits")) return "Free Credits";
   return billing;
 }
 

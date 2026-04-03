@@ -97,13 +97,13 @@ pub fn all_presets() -> Vec<ProviderPreset> {
         },
         ProviderPreset {
             name: "kimi",
-            description: "Kimi/Moonshot - unlimited subscription model",
+            description: "Kimi/Moonshot - quota-only free model",
             config: ProviderConfig {
                 enabled: true,
                 api_key: None,
                 api_key_env: Some("KIMI_API_KEY".into()),
                 endpoint: None,
-                billing: Some("unlimited".into()),
+                billing: Some("quota_only:50:0".into()),
                 ..Default::default()
             },
         },

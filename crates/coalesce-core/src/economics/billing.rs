@@ -49,6 +49,22 @@ pub enum BillingType {
     },
 }
 
+impl std::fmt::Display for BillingType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BillingType::Local => write!(f, "local"),
+            BillingType::FreeIncluded => write!(f, "free"),
+            BillingType::QuotaMonthly { quota_total } => write!(f, "quota_monthly:{}", quota_total),
+            BillingType::QuotaRefreshing { quota_per_window, refresh_interval_secs } => write!(f, "quota_refreshing:{}:{}", quota_per_window, refresh_interval_secs),
+            BillingType::UnlimitedSubscription => write!(f, "unlimited"),
+            BillingType::FreeTierCredits { free_credits_usd } => write!(f, "free_credits:{}", free_credits_usd),
+            BillingType::PerToken => write!(f, "per_token"),
+            BillingType::QuotaOnly { quota_per_window, refresh_interval_secs } => write!(f, "quota_only:{}:{}", quota_per_window, refresh_interval_secs),
+            BillingType::QuotaMetered { quota_per_window, refresh_interval_secs } => write!(f, "quota_metered:{}:{}", quota_per_window, refresh_interval_secs),
+        }
+    }
+}
+
 impl BillingType {
     /// Priority band for routing (lower = preferred).
     /// Used in the cascade: free(0) → wait(1) → paid(2)
