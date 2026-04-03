@@ -5,26 +5,33 @@ Smart LLM routing proxy that scores requests across 15 dimensions and routes the
 <!-- Badges -->
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Tests](https://img.shields.io/badge/tests-74%20passing-green)
+![Tests](https://img.shields.io/badge/tests-172%20passing-green)
 
 ---
 
 ## Features
 
 - **15-dimension request scoring** -- classifies prompts into Simple, Medium, Complex, or Reasoning tiers
-- **10 LLM providers** -- GitHub Copilot, OpenRouter, Ollama, GLM/Zhipu, Kimi/Moonshot, Anthropic (via OpenRouter), Google AI, OpenAI, xAI/Grok, DeepSeek
-- **Real-time marginal cost engine** -- computes effective cost per request across all available models
+- **10+ LLM providers** -- GitHub Copilot (multi-account), OpenRouter, Ollama, GLM/Zhipu, Kimi/Moonshot, Anthropic, Google Cloud Code, OpenAI, xAI/Grok, DeepSeek
+- **Real-time marginal cost engine** -- computes effective cost per request across all available models with 8 billing types
 - **Free-first priority cascade** -- local/free/quota models before paid, with configurable wait-vs-pay thresholds
+- **Canonical model families** -- groups equivalent models across providers (e.g. `claude-sonnet-4` from Copilot and Anthropic) for family-aware routing
+- **Per-model overrides** -- customize quality tier, pricing, capabilities, and family for any model via the UI
+- **Rosetta tool layer** -- canonical tool types, equivalence classes, capability-aware routing, and automatic tool substitution across providers
+- **Anthropic API support** -- native `/v1/messages` endpoint with thinking blocks, tool use, and streaming
 - **Circuit breakers** -- automatic provider isolation on repeated failures, with half-open recovery
 - **Request deduplication** -- identical in-flight requests share a single upstream call
-- **Fallback chains** -- up to 3 automatic retries across different providers
-- **SSE streaming** -- full streaming support through the proxy
-- **SQLite storage** -- persistent request logging, stats, and cost tracking
-- **Budget tracking** -- configurable total and daily spending limits
+- **Fallback chains** -- automatic retries across different providers with auth-skip logic
+- **SSE streaming** -- full streaming support through the proxy with thinking/reasoning token passthrough
+- **SQLite storage** -- persistent request logging, stats, cost tracking, and provider config
+- **Budget tracking** -- configurable total and daily spending limits with threshold alerts
+- **Auto-failover rules** -- configurable rules engine for automatic provider failover
 - **Plugin system** -- trait-based hooks (on_request, on_route, on_response), WASM-ready architecture
 - **Prompt injection detection** -- configurable sensitivity (off/low/medium/high)
-- **Web dashboard** -- embedded single-page app with routing playground, stats, and model browser
+- **Tauri 2 desktop app** -- system tray, React dashboard, native notifications
+- **Web dashboard** -- full-featured UI with chat, routing playground, cost analytics, provider config, and live events
 - **gRPC transport** -- protobuf-encoded API on port 8403 for high-frequency agent communication
+- **Configuration profiles** -- save/restore/import full provider and routing configurations
 - **Load testing** -- built-in `bench` command with percentile latency reporting
 - **OpenAI-compatible API** -- drop-in replacement at `/v1/chat/completions`
 
@@ -92,74 +99,184 @@ The response includes routing metadata in the `x_coalesce` field:
 
 ```
                          Clients
-                    (curl, SDKs, agents)
+                    (curl, SDKs, agents,
+                     Claude Code, Cursor)
                            |
               +------------+------------+
-              |                         |
-        HTTP :8402                gRPC :8403
-              |                         |
-    +---------+---------+     +---------+---------+
-    |   Axum REST API   |     |   Tonic gRPC API  |
-    +-------------------+     +-------------------+
-              |                         |
-              +------------+------------+
+              |            |            |
+        HTTP :8402   Anthropic :8402  gRPC :8403
+        /v1/chat/*   /v1/messages     protobuf
+              |            |            |
+    +---------+------------+------------+---------+
+    |              Unified Request Handler         |
+    +----------------------------------------------+
                            |
                    +-------+-------+
                    |    Router     |
                    | 15-dimension  |
                    |   scorer      |
+                   | tier: Simple  |
+                   | Medium/Complex|
+                   | /Reasoning    |
                    +-------+-------+
                            |
                    +-------+-------+
                    |   Economics   |
                    |    Engine     |
                    | marginal cost |
-                   |  + quotas     |
+                   | 8 billing     |
+                   | types + quota |
+                   | tracking      |
                    +-------+-------+
                            |
-            +--------------+--------------+
-            |              |              |
-     +------+------+ +----+----+ +-------+-------+
-     | Free/Local  | |  Quota  | |     Paid      |
-     | Ollama      | | Copilot | | OpenRouter    |
-     |             | | Kimi    | | OpenAI, xAI   |
-     |             | | GLM     | | Google, Deep- |
-     |             | |         | | Seek          |
-     +------+------+ +----+----+ +-------+-------+
-            |              |              |
-     +------+--------------+--------------+------+
-     |         Circuit Breakers + Dedup          |
-     +-------------------+----------------------+
-                         |
-                   +-----+-----+
-                   |  SQLite   |
-                   |  Storage  |
-                   +-----------+
+                   +-------+-------+
+                   |   Rosetta     |
+                   | canonical     |
+                   | tools, model  |
+                   | families,     |
+                   | equivalence   |
+                   | substitution  |
+                   +-------+-------+
+                           |
+         +---------+-------+-------+---------+
+         |         |       |       |         |
+    +----+---+ +---+---+ +-+---+ +-+------+ +--+------+
+    | Free/  | | Quota | | Paid| | Quota  | | Quota   |
+    | Local  | | Only  | |     | | Metered| | Refresh |
+    | Ollama | | GLM   | | OR  | | Copilot| | Copilot |
+    |        | | Kimi  | | OAI | | (work) | | (pers.) |
+    |        | |Google | | xAI | |        | |         |
+    |        | |       | | DS  | |        | |         |
+    +----+---+ +---+---+ +-+---+ +-+------+ +--+------+
+         |         |       |       |         |
+    +----+---------+-------+-------+---------+----+
+    |    Circuit Breakers + Dedup + Failover       |
+    |    Auth-skip | Priority routing | Rules      |
+    +----------------------+-----------------------+
+                           |
+                   +-------+-------+
+                   |    SQLite     |
+                   | requests, stats|
+                   | quotas, config |
+                   | provider state |
+                   +---------------+
 ```
+
+### How a Request Flows
+
+1. **Ingress** -- Request arrives via OpenAI-compat (`/v1/chat/completions`), Anthropic (`/v1/messages`), or gRPC
+2. **Scoring** -- The 15-dimension scorer analyzes the prompt (token count, code presence, reasoning markers, technical terms, etc.) and assigns a quality tier: Simple, Medium, Complex, or Reasoning
+3. **Candidate Selection** -- All models matching the tier are gathered. Models are filtered by capabilities (vision, tools, reasoning) if the request requires them
+4. **Economics Ranking** -- The marginal cost engine computes the effective cost for each candidate based on its billing type and current quota state. Free/local models rank first, then quota-available, then paid
+5. **Priority + Family Routing** -- Provider priorities and canonical model families influence ordering. If provider A has priority 10 and provider B has priority 50, A's models are tried first at equal cost
+6. **Rosetta Translation** -- If the request includes tools, the Rosetta layer translates between provider-specific tool formats and substitutes equivalent tools from the canonical registry
+7. **Dispatch** -- The request is sent to the top-ranked candidate. Circuit breakers gate access (open = skip, half-open = test one request)
+8. **Fallback** -- If the provider fails (timeout, 5xx, auth error), the router moves to the next candidate. Auth-failed providers are skipped without burning attempt slots. Up to 3 attempts
+9. **Response** -- The response streams back through the proxy with routing metadata in headers and the `x_coalesce` field. Thinking/reasoning tokens are passed through for models that support them
+10. **Accounting** -- Cost is recorded, quota state updated, circuit breaker notified of success/failure, and the request is logged to SQLite
+
+### Billing Types
+
+The economics engine supports 8 billing models that determine routing priority:
+
+| Type | Config String | Behavior | Priority |
+|------|--------------|----------|----------|
+| Local | `local` | Always free, local hardware | 0 (free) |
+| Free Included | `free` | Free with subscription | 0 (free) |
+| Unlimited | `unlimited` | Flat subscription, unlimited use | 0 (free) |
+| Quota Monthly | `quota_monthly:N` | N requests/month, stops when exhausted | 0 (free) |
+| Quota Refreshing | `quota_refreshing:N:secs` | N requests per time window, refreshes | 0 (free) |
+| Quota Only | `quota_only:N:secs` | Free while quota lasts, then unavailable | 0 (free) |
+| Quota + Metered | `quota_metered:N:secs` | Free while quota lasts, then per-token | 0→2 |
+| Per Token | `per_token` | Pay per token always | 2 (paid) |
+| Free Credits | `free_credits:N` | N USD free credits, then per-token | 0→2 |
+
+The router always prefers priority band 0 (free) over band 2 (paid). Within the same band, lower provider priority number wins.
 
 ## Providers
 
-| Provider       | Env Variable          | Billing Type          | Notes                               |
-|----------------|-----------------------|-----------------------|-------------------------------------|
-| Ollama         | --                    | `local`               | Auto-detected on localhost:11434    |
-| GitHub Copilot | `GITHUB_TOKEN`        | `quota_refreshing`    | Copilot subscription credits        |
-| OpenRouter     | `OPENROUTER_API_KEY`  | `per_token`           | Access to 100+ models               |
-| GLM / Zhipu    | `GLM_API_KEY`         | `per_token`           | Chinese LLM provider                |
-| Kimi / Moonshot| `KIMI_API_KEY`        | `unlimited`           | Long-context specialist             |
-| DeepSeek       | `DEEPSEEK_API_KEY`    | `per_token`           | Reasoning and code models           |
-| OpenAI         | `OPENAI_API_KEY`      | `per_token`           | GPT-4o, GPT-4, etc.                |
-| Google AI      | `GOOGLE_API_KEY`      | `free_credits:N`      | Gemini models                       |
-| xAI / Grok     | `XAI_API_KEY`         | `per_token`           | Grok models                         |
-| Anthropic      | via OpenRouter        | `per_token`           | Claude models via OpenRouter        |
+| Provider       | Auth Type | Default Billing | Notes |
+|----------------|-----------|-----------------|-------|
+| Ollama         | None      | `local` | Auto-detected on localhost:11434 |
+| GitHub Copilot | OAuth     | `quota_refreshing:50:18000` | Multi-account support, 5h refresh windows |
+| OpenRouter     | API Key   | `per_token` | 300+ models, single key |
+| GLM / Zhipu    | API Key   | `quota_only:50:0` | z.ai coding endpoint |
+| Kimi / Moonshot| API Key   | `quota_only:50:0` | Long-context specialist |
+| Anthropic      | API Key   | `per_token` | Direct Claude API + `/v1/messages` |
+| Google         | OAuth     | `quota_only:50:0` | Cloud Code Assist (Antigravity) |
+| OpenAI         | API Key   | `per_token` | GPT-4o, o1, o3 |
+| xAI / Grok     | API Key   | `per_token` | Grok models |
+| DeepSeek       | API Key   | `per_token` | Reasoning and code models |
 
-**Billing types:**
-- `local` -- no cost (Ollama, local models)
-- `free` -- provider-included free tier
-- `unlimited` -- flat subscription, unlimited use
-- `per_token` -- pay per input/output token
-- `quota_monthly:N` -- N requests per month
-- `quota_refreshing:N:secs` -- N requests per time window
-- `free_credits:N` -- N USD in free credits before paid
+All billing types are configurable per-provider via the UI or API. Changes persist across restarts.
+
+## Dashboard & Desktop App
+
+The web dashboard runs at `http://127.0.0.1:8402/` and is also available as a Tauri 2 desktop app with system tray integration.
+
+**Tabs:**
+- **Chat** -- Test conversations with any model through the proxy, with streaming and thinking token display
+- **Overview** -- Total requests, success rate, cost savings, latency, provider status cards
+- **Providers** -- Model browser with pricing, capabilities, quality tier, marginal cost, enable/disable toggles, and per-model overrides
+- **Provider Config** -- Add/remove providers, set billing type and priority, Copilot account ordering, Ollama model management
+- **Local LLM** -- Ollama model management (pull, delete, preload)
+- **Cost Analytics** -- Savings waterfall, budget tracking, daily cost trends
+- **Usage Metrics** -- Per-provider token usage, quota burndown, latency stats
+- **Routing Playground** -- Dry-run the router: see 15-dimension scores, tier classification, ranked candidates with costs
+- **Request Timeline** -- Paginated history with search, export to CSV
+- **System Prompts** -- Manage system prompts for different use cases
+- **Live Events** -- Real-time SSE stream of routing decisions
+- **Settings** -- Theme, proxy config, notifications
+
+Build the desktop app:
+
+```bash
+cd desktop
+npm install
+npm run tauri build
+```
+
+## API
+
+### OpenAI-Compatible Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/chat/completions` | Chat completion (streaming + non-streaming) |
+| GET | `/v1/models` | List all models with pricing and capabilities |
+| GET | `/v1/stats` | Request statistics and quota states |
+
+### Anthropic-Compatible Endpoint
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/messages` | Anthropic Messages API with thinking blocks and tool use |
+
+### Management API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check with circuit breaker states |
+| GET | `/api/v1/providers` | Provider list with billing, status, stats |
+| GET | `/api/v1/providers/quotas` | Quota states for all providers |
+| PUT | `/api/v1/providers/{name}/billing` | Update provider billing type |
+| GET/PUT | `/api/v1/providers/priorities` | Provider priority and pricing mode |
+| POST | `/api/v1/providers/manage` | Add a new provider |
+| PUT | `/api/v1/providers/manage/{name}` | Update provider config |
+| POST | `/api/v1/routing/playground` | Dry-run the router on a prompt |
+| GET | `/api/v1/stats/summary` | Aggregated stats |
+| GET | `/api/v1/stats/timeline` | Paginated request history |
+| GET | `/api/events` | SSE stream of live routing events |
+
+### gRPC API (port 8403)
+
+| RPC Method | Description |
+|------------|-------------|
+| `ChatCompletion` | Route and complete a chat request |
+| `ListModels` | List available models |
+| `Health` | Service health check |
+
+Proto definition: `proto/coalesce.proto`
 
 ## CLI Usage
 
@@ -176,15 +293,13 @@ coalesce doctor
 
 # Generate default config file
 coalesce init
-coalesce init --output /etc/coalesce/config.toml
 
-# View request statistics from the database
+# View request statistics
 coalesce stats
 
 # Load test the proxy
 coalesce bench -n 500 -c 20
-coalesce bench --routing-only              # test scoring only (no upstream calls)
-coalesce bench --target http://remote:8402
+coalesce bench --routing-only
 
 # Global options
 coalesce --config /path/to/config.toml serve
@@ -208,19 +323,13 @@ host = "127.0.0.1"
 level = "info"       # trace, debug, info, warn, error
 format = "pretty"    # "pretty" or "json"
 
-# Budget limits (0.0 = unlimited)
 [budget]
 total_limit_usd = 10.0
 daily_limit_usd = 2.0
 
-# Prompt injection detection
 [sanitize]
 enabled = true
 injection_sensitivity = "medium"   # off, low, medium, high
-max_request_size_bytes = 1048576   # 1 MB
-max_messages = 100
-
-# --- Providers ---
 
 [providers.ollama]
 enabled = true
@@ -229,256 +338,24 @@ billing = "local"
 
 [providers.copilot]
 enabled = true
-api_key_env = "GITHUB_TOKEN"
-billing = "quota_refreshing:50:18000"
+billing = "quota_metered:50:18000"
+priority = 50          # lower = tried first
+pricing_mode = "subscription"  # "subscription" or "metered"
 
 [providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
 billing = "per_token"
-
-[providers.openai]
-enabled = true
-api_key_env = "OPENAI_API_KEY"
-billing = "per_token"
-
-[providers.google]
-enabled = true
-api_key_env = "GOOGLE_API_KEY"
-billing = "free_credits:50.0"
-
-[providers.deepseek]
-enabled = true
-api_key_env = "DEEPSEEK_API_KEY"
-billing = "per_token"
-
-[providers.xai]
-enabled = true
-api_key_env = "XAI_API_KEY"
-billing = "per_token"
-
-[providers.glm]
-enabled = true
-api_key_env = "GLM_API_KEY"
-billing = "per_token"
-
-[providers.kimi]
-enabled = true
-api_key_env = "KIMI_API_KEY"
-billing = "unlimited"
-
-# --- Routing ---
-
-[routing.weights]
-token_count = 0.15
-code_presence = 0.12
-reasoning_markers = 0.15
-technical_terms = 0.08
-
-[routing.thresholds]
-simple_max = 0.12
-medium_max = 0.25
-complex_max = 0.40
 ```
 
-## Dashboard
+## Workspace Crates
 
-<!-- ![Dashboard Screenshot](docs/dashboard.png) -->
-
-The web dashboard is available at `http://127.0.0.1:8402/` when the proxy is running. It is a single-page app embedded directly in the binary (no external assets).
-
-**Dashboard features:**
-- **Routing Playground** -- type a prompt and see the 15-dimension scoring breakdown, tier classification, and ranked candidate models with marginal costs
-- **Provider Status** -- circuit breaker states, billing types, and model counts per provider
-- **Request Stats** -- total requests, success rate, cost tracking, average latency
-- **Request Timeline** -- paginated history of routed requests with provider, model, tier, and cost
-- **Model Browser** -- all discovered models with pricing, capabilities (reasoning, vision, tools), and availability
-
-Built with Tailwind CSS and vanilla JavaScript. No build step required.
-
-## Desktop App
-
-Coalesce includes a Tauri 2 desktop application (`desktop/src-tauri`) that wraps the proxy with:
-
-- **System tray** -- start/stop the proxy from the menu bar
-- **React dashboard** -- full-featured UI built with React
-- **Native notifications** -- budget alerts and provider failures
-- **Auto-start** -- optional launch at login
-
-Build the desktop app:
-
-```bash
-cd desktop
-npm install
-npm run tauri build
-```
-
-## API Transports
-
-Coalesce exposes two parallel API transports that share the same routing engine, economics logic, and provider pool. Choose the one that fits your use case:
-
-### Axum REST API (port 8402) -- Human & Tool Friendly
-
-The REST API is an **OpenAI-compatible HTTP/JSON endpoint**. Any application that can talk to the OpenAI API can point at Coalesce instead -- just change the base URL to `http://localhost:8402`. This makes it a **drop-in replacement** for Claude Code, Cursor, Continue, Open Interpreter, or any OpenAI SDK client.
-
-The REST API also powers the dashboard UI and desktop app with additional endpoints for provider management, stats, and live event streaming.
-
-**Best for:** Developer tools, IDE integrations, the dashboard UI, and any client that already speaks OpenAI's API format.
-
-#### OpenAI-Compatible Endpoints
-
-| Method | Path                     | Description                          |
-|--------|--------------------------|--------------------------------------|
-| POST   | `/v1/chat/completions`   | Chat completion (streaming + non-streaming) |
-| GET    | `/v1/models`             | List all available models with pricing |
-| GET    | `/v1/stats`              | Request statistics and quota states  |
-
-#### Dashboard & Management Endpoints
-
-| Method | Path                          | Description                        |
-|--------|-------------------------------|------------------------------------|
-| GET    | `/health`                     | Health check with circuit breaker states |
-| GET    | `/api/v1/providers`           | Provider list with status and billing |
-| GET    | `/api/v1/providers/quotas`    | Quota states for all providers     |
-| POST   | `/api/v1/routing/playground`  | Dry-run the router on a prompt     |
-| GET    | `/api/v1/routing/profiles`    | List routing profiles from config  |
-| GET    | `/api/v1/stats/summary`       | Aggregated stats                   |
-| GET    | `/api/v1/stats/timeline`      | Paginated request history (`?limit=50&offset=0`) |
-| GET    | `/api/events`                 | SSE stream of live routing decisions |
-
-#### Response Headers
-
-Streaming responses include routing metadata:
-
-| Header                   | Description                     |
-|--------------------------|---------------------------------|
-| `X-Coalesce-Model`       | Selected model ID               |
-| `X-Coalesce-Provider`    | Provider name                   |
-| `X-Coalesce-Tier`        | Classified tier (Simple/Medium/Complex/Reasoning) |
-| `X-Coalesce-Attempt`     | Fallback attempt number (1-3)   |
-
-### Tonic gRPC API (port 8403) -- Agent & Pipeline Friendly
-
-The gRPC API provides the same routing capabilities over **Protocol Buffers** (binary-encoded messages) instead of JSON. It runs automatically on HTTP port + 1.
-
-**Why gRPC?** For high-frequency agent orchestration scenarios -- multi-agent systems dispatching hundreds of routing decisions per minute -- gRPC eliminates JSON serialization overhead and provides ~2-10x lower latency per call. The `.proto` schema also enables auto-generated, strongly-typed client SDKs in any language (Python, Go, TypeScript, Java, etc.).
-
-**Best for:** AI agent pipelines, multi-agent orchestrators, batch processing systems, and any scenario where routing throughput matters.
-
-| RPC Method       | Description                     |
-|------------------|---------------------------------|
-| `ChatCompletion` | Route and complete a chat request |
-| `ListModels`     | List available models           |
-| `Health`         | Service health check            |
-
-Proto definition: `proto/coalesce.proto`
-
-### Transport Comparison
-
-| | REST (Axum) | gRPC (Tonic) |
-|---|---|---|
-| **Port** | 8402 | 8403 |
-| **Format** | JSON over HTTP | Protobuf over HTTP/2 |
-| **Best for** | Human tools (Cursor, Claude Code, dashboard) | Agent-to-agent, high-frequency automation |
-| **Compatibility** | Drop-in OpenAI replacement | Needs generated client stubs |
-| **Streaming** | SSE (Server-Sent Events) | gRPC streaming |
-| **Overhead** | ~1-5ms JSON parse | ~0.1-0.5ms protobuf decode |
-
-## Plugin System
-
-Plugins use a trait-based interface with three lifecycle hooks:
-
-```
-on_request  -->  on_route  -->  on_response
-```
-
-Each hook can return one of:
-- **Continue(data)** -- pass (possibly modified) data to the next stage
-- **Block(message)** -- reject the request with an error
-- **Skip** -- no-op, continue without modification
-
-Plugin manifest fields:
-
-| Field         | Type       | Description                      |
-|---------------|------------|----------------------------------|
-| `name`        | String     | Plugin identifier                |
-| `version`     | String     | Semantic version                 |
-| `description` | String     | Human-readable description       |
-| `hooks`       | Vec        | `on_request`, `on_route`, `on_response` |
-
-The plugin architecture is WASM-ready. Native Rust plugins are loaded at startup; WASM plugin support is planned.
-
-## Security
-
-### Prompt Injection Detection
-
-Coalesce scans incoming messages for prompt injection patterns before routing. Configure sensitivity in `coalesce.toml`:
-
-```toml
-[sanitize]
-enabled = true
-injection_sensitivity = "medium"  # off | low | medium | high
-max_request_size_bytes = 1048576
-max_messages = 100
-```
-
-| Level    | Behavior                                               |
-|----------|--------------------------------------------------------|
-| `off`    | No scanning                                            |
-| `low`    | Flag obvious injection phrases                         |
-| `medium` | Flag injection patterns + role confusion attempts      |
-| `high`   | Aggressive detection, may flag legitimate edge cases   |
-
-Flagged requests receive a score (0.0 to 1.0) and a list of matched patterns. At higher sensitivity levels, flagged requests are blocked before reaching any provider.
-
-### Request Limits
-
-- Maximum request body size: 1 MB (configurable)
-- Maximum messages per request: 100 (configurable)
-- Budget enforcement: total and daily USD limits
-
-## Building from Source
-
-### Prerequisites
-
-- Rust 1.75+ (2021 edition)
-- Protobuf compiler (`protoc`) for gRPC support
-- Node.js 18+ (desktop app only)
-
-### Build
-
-```bash
-# All crates (core, proxy, CLI)
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run with logging
-RUST_LOG=coalesce=debug cargo run -- serve
-```
-
-### Workspace Crates
-
-| Crate               | Path                         | Description                        |
-|----------------------|------------------------------|------------------------------------|
-| `coalesce-core`   | `crates/coalesce-core`    | Router, economics, providers, storage, plugins, sanitize |
-| `coalesce-proxy`  | `crates/coalesce-proxy`   | HTTP server (Axum), gRPC server (Tonic), web dashboard |
-| `coalesce-cli`    | `crates/coalesce-cli`     | CLI binary with serve, models, doctor, stats, bench |
-| desktop (Tauri)      | `desktop/src-tauri`          | Tauri 2 desktop app with system tray |
-
-### Key Dependencies
-
-| Dependency | Purpose                |
-|------------|------------------------|
-| Axum 0.8   | HTTP server            |
-| Tonic 0.12 | gRPC server            |
-| Tokio 1    | Async runtime          |
-| Reqwest 0.12 | HTTP client          |
-| rusqlite 0.32 | SQLite storage      |
-| DashMap 6  | Concurrent hash maps   |
-| Clap 4     | CLI argument parsing   |
-| Tauri 2    | Desktop app framework  |
+| Crate | Path | Description |
+|-------|------|-------------|
+| `coalesce-core` | `crates/coalesce-core` | Router, economics, providers, storage, plugins, Rosetta |
+| `coalesce-proxy` | `crates/coalesce-proxy` | HTTP server (Axum), gRPC (Tonic), dashboard, API handlers |
+| `coalesce-cli` | `crates/coalesce-cli` | CLI binary: serve, models, doctor, stats, bench |
+| desktop | `desktop/` | Tauri 2 desktop app + React UI |
 
 ## License
 
