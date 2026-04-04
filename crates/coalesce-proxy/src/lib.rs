@@ -1063,6 +1063,134 @@ async fn chat_completions(
     });
     let rosetta_ms = t0.elapsed().as_millis();
 
+    // 0b. Check for specific model request (not "auto" or a tier name)
+    let tier_names = ["auto", "simple", "medium", "complex", "reasoning"];
+    let requested_model_lower = request.model.to_lowercase();
+    if !tier_names.contains(&requested_model_lower.as_str()) {
+        // Client requested a specific model — find it and dispatch directly
+        let models_snapshot: Vec<ModelInfo> = state.models.read().unwrap().clone();
+        let providers_snapshot: Vec<Arc<dyn Provider>> = state.providers.read().unwrap().clone();
+
+        // Find the model — for explicit requests, skip circuit breaker check (user chose this model)
+        let matched = models_snapshot.iter().find(|m| m.id == request.model);
+
+        if let Some(target_model) = matched {
+            let provider = providers_snapshot.iter().find(|p| p.name() == target_model.provider);
+            if let Some(provider) = provider {
+                info!(
+                    model = %target_model.id,
+                    provider = %target_model.provider,
+                    "Direct model request — bypassing router"
+                );
+
+                let mut forwarded = request.clone();
+                forwarded.model = target_model.id.clone();
+
+                // Rosetta egress for direct requests
+                if let Some(ref nt) = normalized_tools {
+                    if let Ok(translated) = state.rosetta.translate_tools_for_provider(&target_model.provider, nt) {
+                        forwarded.tools = Some(translated);
+                    }
+                    if let Some(ref tc) = nt.tool_choice {
+                        forwarded.tool_choice = Some(
+                            state.rosetta.translate_tool_choice_for_provider(&target_model.provider, tc)
+                        );
+                    }
+                }
+
+                if request.stream {
+                    match provider.chat_stream(&forwarded).await {
+                        Ok(stream) => {
+                            if let Some(cb) = state.circuit_breakers.get(&target_model.provider) { cb.record_success(); }
+                            let _ = state.storage.log_request(&RequestLogEntry {
+                                id: None, timestamp: None,
+                                tier: "direct".into(), score: 0.0,
+                                provider: target_model.provider.clone(), model: target_model.id.clone(),
+                                input_tokens: None, output_tokens: None, cost_usd: None,
+                                latency_ms: Some(start.elapsed().as_millis() as u64), success: true,
+                            });
+                            let body_stream = stream.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                            return Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "text/event-stream")
+                                .header("Cache-Control", "no-cache")
+                                .header("X-Coalesce-Provider", &target_model.provider)
+                                .header("X-Coalesce-Model", &target_model.id)
+                                .header("X-Coalesce-Tier", "direct")
+                                .body(Body::from_stream(body_stream))
+                                .unwrap();
+                        }
+                        Err(e) => {
+                            if let Some(cb) = state.circuit_breakers.get(&target_model.provider) { cb.record_failure(); }
+                            warn!(model = %target_model.id, provider = %target_model.provider, error = %e, "Direct model request failed");
+                            return Response::builder()
+                                .status(StatusCode::BAD_GATEWAY)
+                                .header("Content-Type", "application/json")
+                                .header("X-Coalesce-Provider", &target_model.provider)
+                                .header("X-Coalesce-Model", &target_model.id)
+                                .header("X-Coalesce-Tier", "direct")
+                                .body(Body::from(serde_json::json!({
+                                    "error": {
+                                        "message": format!("Provider error: {} - {}", target_model.provider, e),
+                                        "type": "provider_error",
+                                        "provider": &target_model.provider,
+                                        "model": &target_model.id,
+                                    }
+                                }).to_string()))
+                                .unwrap();
+                        }
+                    }
+                } else {
+                    match provider.chat(&forwarded).await {
+                        Ok(mut resp) => {
+                            if let Some(cb) = state.circuit_breakers.get(&target_model.provider) { cb.record_success(); }
+                            let _ = state.storage.log_request(&RequestLogEntry {
+                                id: None, timestamp: None,
+                                tier: "direct".into(), score: 0.0,
+                                provider: target_model.provider.clone(), model: target_model.id.clone(),
+                                input_tokens: None, output_tokens: None, cost_usd: None,
+                                latency_ms: Some(start.elapsed().as_millis() as u64), success: true,
+                            });
+                            resp["x_coalesce"] = serde_json::json!({
+                                "tier": "direct", "score": 0.0,
+                                "provider": &target_model.provider, "model": &target_model.id,
+                                "attempt": 1
+                            });
+                            return Json(resp).into_response();
+                        }
+                        Err(e) => {
+                            if let Some(cb) = state.circuit_breakers.get(&target_model.provider) { cb.record_failure(); }
+                            warn!(model = %target_model.id, provider = %target_model.provider, error = %e, "Direct model request failed");
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(serde_json::json!({
+                                    "error": {
+                                        "message": format!("Provider error: {} - {}", target_model.provider, e),
+                                        "type": "provider_error",
+                                        "provider": &target_model.provider,
+                                        "model": &target_model.id,
+                                    }
+                                })),
+                            ).into_response();
+                        }
+                    }
+                }
+            }
+        }
+        // Model not found in loaded models — return error, don't silently reroute
+        warn!(model = %request.model, "Specific model requested but not found in loaded models");
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!("Model '{}' not found. It may not be loaded — check provider configuration and API key.", request.model),
+                    "type": "model_not_found",
+                    "model": &request.model,
+                }
+            })),
+        ).into_response();
+    }
+
     // 1. Score and route
     let t1 = Instant::now();
     let scoring = coalesce_core::router::route(&request, &state.config.routing);

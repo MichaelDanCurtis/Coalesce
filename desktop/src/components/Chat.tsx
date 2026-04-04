@@ -170,6 +170,8 @@ export default function Chat() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedProvider, setSelectedProvider] = useState<string>("any");
+  const [selectedModel, setSelectedModel] = useState<string>("auto");
   const [selectedRouting, setSelectedRouting] = useState<RoutingPath | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
@@ -185,6 +187,16 @@ export default function Chat() {
     () => conversations.find((c) => c.id === activeId) || null,
     [conversations, activeId]
   );
+
+  const providers = useMemo(() => {
+    const provSet = new Set(models.map((m) => m.provider));
+    return Array.from(provSet).sort();
+  }, [models]);
+
+  const filteredModels = useMemo(() => {
+    if (selectedProvider === "any") return models;
+    return models.filter((m) => m.provider === selectedProvider);
+  }, [models, selectedProvider]);
 
   const filteredConversations = useMemo(() => {
     if (!searchQuery) return conversations;
@@ -259,15 +271,14 @@ export default function Chat() {
   );
 
   const createNewChat = useCallback(() => {
-    const model = models.length > 0 ? "auto" : "auto";
-    const conv = newConversation(model);
+    const conv = newConversation(selectedModel);
     setConversations((prev) => [conv, ...prev]);
     setActiveId(conv.id);
     setInput("");
     setAttachments([]);
     setSelectedRouting(null);
     inputRef.current?.focus();
-  }, [models]);
+  }, [selectedModel]);
 
   const deleteConversation = useCallback(
     (id: string) => {
@@ -402,7 +413,7 @@ export default function Chat() {
 
       // Create new conversation if needed
       if (!conv) {
-        const newConv = newConversation("auto");
+        const newConv = newConversation(selectedModel);
         setConversations((prev) => [newConv, ...prev]);
         setActiveId(newConv.id);
         convId = newConv.id;
@@ -503,7 +514,7 @@ export default function Chat() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: conv?.model || "auto",
+            model: selectedModel || conv?.model || "auto",
             messages: apiMessages,
             stream: true,
           }),
@@ -577,8 +588,8 @@ export default function Chat() {
           buffer = lines.pop() || "";
 
           for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(line.startsWith("data: ") ? 6 : 5).trim();
             if (data === "[DONE]") continue;
 
             try {
@@ -663,7 +674,7 @@ export default function Chat() {
         setAbortController(null);
       }
     },
-    [input, attachments, active, activeId, streaming, updateConversation]
+    [input, attachments, active, activeId, streaming, updateConversation, selectedModel]
   );
 
   const stopGeneration = useCallback(() => {
@@ -784,6 +795,7 @@ export default function Chat() {
               }`}
               onClick={() => {
                 setActiveId(conv.id);
+                setSelectedModel(conv.model || "auto");
                 const lastRouting = [...conv.messages]
                   .reverse()
                   .find((m) => m.routing)?.routing;
@@ -814,33 +826,68 @@ export default function Chat() {
 
       {/* ─── Center: Chat Area ───────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar: model selector + settings */}
+        {/* Top bar: provider + model selectors + settings */}
         <div className="flex items-center gap-2 px-4 py-2 border-b border-themed bg-surface">
+          {/* Provider dropdown */}
           <select
-            value={active?.model || "auto"}
+            value={selectedProvider}
             onChange={(e) => {
+              const prov = e.target.value;
+              setSelectedProvider(prov);
+              setSelectedModel("auto");
               if (active) {
                 updateConversation(active.id, (c) => ({
                   ...c,
-                  model: e.target.value,
+                  model: "auto",
+                }));
+              }
+            }}
+            className="px-2 py-1.5 text-sm rounded-md bg-surface-alt border border-themed text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+          >
+            <option value="any">Any Provider</option>
+            {providers.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+
+          {/* Model dropdown (filtered by provider) */}
+          <select
+            key={`model-select-${selectedProvider}`}
+            value={selectedModel}
+            onChange={(e) => {
+              const model = e.target.value;
+              setSelectedModel(model);
+              if (active) {
+                updateConversation(active.id, (c) => ({
+                  ...c,
+                  model,
                 }));
               }
             }}
             className="flex-1 max-w-xs px-2 py-1.5 text-sm rounded-md bg-surface-alt border border-themed text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
           >
             <option value="auto">auto (smart routing)</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.id} ({m.provider})
+            {filteredModels.map((m) => (
+              <option key={`${m.provider}:${m.id}`} value={m.id}>
+                {m.id}{selectedProvider === "any" ? ` (${m.provider})` : ""}
               </option>
             ))}
           </select>
 
           <button
-            onClick={() => setShowSettings(!showSettings)}
-            className="px-2 py-1.5 text-xs rounded-md bg-surface-alt border border-themed text-secondary hover:text-primary transition-colors"
+            onClick={() => {
+              if (active) setShowSettings(!showSettings);
+            }}
+            disabled={!active}
+            className={`px-2 py-1.5 text-xs rounded-md bg-surface-alt border border-themed transition-colors ${
+              active
+                ? "text-secondary hover:text-primary cursor-pointer"
+                : "text-secondary/40 cursor-not-allowed"
+            }`}
           >
-            {showSettings ? "Hide Settings" : "Settings"}
+            {showSettings && active ? "Hide Settings" : "Settings"}
           </button>
 
           {active && (

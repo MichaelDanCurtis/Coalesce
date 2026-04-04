@@ -10,12 +10,14 @@ use reqwest::Client;
 pub struct OpenAICompatProvider {
     client: Client,
     provider_name: String,
-    base_url: String,
+    pub base_url: String,
     api_key: String,
     /// Static model list (for providers without a /models endpoint)
-    known_models: Vec<ModelInfo>,
+    pub known_models: Vec<ModelInfo>,
     /// Whether to try GET /models for discovery
     supports_model_list: bool,
+    /// Optional custom User-Agent (e.g. for Kimi coding agent identification)
+    user_agent: Option<String>,
 }
 
 impl OpenAICompatProvider {
@@ -33,11 +35,27 @@ impl OpenAICompatProvider {
             api_key,
             known_models,
             supports_model_list,
+            user_agent: None,
         }
+    }
+
+    pub fn with_user_agent(mut self, ua: impl Into<String>) -> Self {
+        self.user_agent = Some(ua.into());
+        self
     }
 
     fn auth_header(&self) -> String {
         format!("Bearer {}", self.api_key)
+    }
+
+    /// Apply common headers (auth + optional user-agent) to a request builder
+    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let b = builder.header("Authorization", self.auth_header());
+        if let Some(ref ua) = self.user_agent {
+            b.header("User-Agent", ua.as_str())
+        } else {
+            b
+        }
     }
 
     /// Build a ModelInfo from a raw model ID (e.g. "gemini-3.1-pro-latest").
@@ -149,10 +167,9 @@ impl Provider for OpenAICompatProvider {
             return Ok(self.known_models.clone());
         }
 
-        let resp = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", self.auth_header())
+        let resp = self.apply_headers(
+            self.client.get(format!("{}/models", self.base_url))
+        )
             .send()
             .await;
 
@@ -196,10 +213,9 @@ impl Provider for OpenAICompatProvider {
     }
 
     async fn chat(&self, request: &ChatRequest) -> Result<serde_json::Value> {
-        let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", self.auth_header())
+        let resp = self.apply_headers(
+            self.client.post(format!("{}/chat/completions", self.base_url))
+        )
             .json(&request)
             .send()
             .await?;
@@ -222,10 +238,9 @@ impl Provider for OpenAICompatProvider {
         let mut req = request.clone();
         req.stream = true;
 
-        let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", self.auth_header())
+        let resp = self.apply_headers(
+            self.client.post(format!("{}/chat/completions", self.base_url))
+        )
             .json(&req)
             .send()
             .await?;
@@ -254,10 +269,9 @@ impl Provider for OpenAICompatProvider {
             return Ok(true);
         }
 
-        let resp = self
-            .client
-            .get(format!("{}/models", self.base_url))
-            .header("Authorization", self.auth_header())
+        let resp = self.apply_headers(
+            self.client.get(format!("{}/models", self.base_url))
+        )
             .send()
             .await;
 
@@ -308,6 +322,7 @@ pub mod factories {
     }
 
     /// Kimi — api.kimi.com/coding/v1 (sk-kimi- keys)
+    /// Requires coding-agent User-Agent to pass Kimi's access check.
     pub fn kimi(api_key: String) -> OpenAICompatProvider {
         OpenAICompatProvider::new(
             "kimi".into(),
@@ -331,7 +346,7 @@ pub mod factories {
                 },
             ],
             true,
-        )
+        ).with_user_agent("claude-code/1.0")
     }
 
     /// DeepSeek — api.deepseek.com
