@@ -1,7 +1,9 @@
 pub mod grpc;
 pub mod harness;
 pub mod rules;
+pub mod token_vault;
 
+use token_vault::TokenVault;
 use coalesce_core::cache::dedup::{DedupAction, DedupResult, RequestDedup};
 use coalesce_core::cache::semantic::SemanticCache;
 use coalesce_core::economics::budget::BudgetTracker;
@@ -17,7 +19,11 @@ use coalesce_core::providers::ollama::OllamaProvider;
 use coalesce_core::providers::openai_compat::factories;
 use coalesce_core::providers::openrouter::OpenRouterProvider;
 use coalesce_core::providers::Provider;
+use coalesce_core::cache::response::{ResponseCache, ResponseCacheConfig};
+use coalesce_core::providers::mock::MockProvider;
 use coalesce_core::rosetta::RosettaContext;
+use coalesce_core::mcp::{McpRegistry, McpScanner, McpServerConfig, McpTransport, McpConfigSource};
+use coalesce_core::rosetta::thinking_optimizer::{ThinkingOptimizer, ThinkingOptimizerConfig};
 use coalesce_core::storage::{RequestLogEntry, Storage};
 use coalesce_core::types::{ChatRequest, ContentPart, Message, MessageContent, ModelInfo, QualityTier, derive_canonical_family};
 use axum::{
@@ -211,6 +217,16 @@ pub struct ProxyState {
     pub rules: rules::RulesEngine,
     /// Rosetta: canonical tool types, equivalence classes, capability-aware routing
     pub rosetta: RosettaContext,
+    /// Thinking optimizer — auto-enables extended thinking for capable models
+    pub thinking_optimizer: ThinkingOptimizer,
+    /// Secure credential vault for provider tokens
+    pub token_vault: TokenVault,
+    /// Response cache (content-hash based)
+    pub response_cache: ResponseCache,
+    /// MCP server registry
+    pub mcp_registry: McpRegistry,
+    /// Mock provider enabled flag
+    pub mock_enabled: std::sync::atomic::AtomicBool,
 }
 
 impl ProxyState {
@@ -368,6 +384,11 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         disabled_models: DashMap::new(),
         rules: rules::RulesEngine::new(),
         rosetta: RosettaContext::new(),
+        thinking_optimizer: ThinkingOptimizer::new(ThinkingOptimizerConfig::default()),
+        token_vault: TokenVault::new(),
+        response_cache: ResponseCache::new(ResponseCacheConfig::default()),
+        mcp_registry: McpRegistry::new(),
+        mock_enabled: std::sync::atomic::AtomicBool::new(false),
     });
 
     // Load disabled providers/models from DB
@@ -720,8 +741,13 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/v1/messages", post(anthropic_messages))
         // Harness management
         .route("/api/v1/harnesses", get(api_harnesses_list))
+        .route("/api/v1/harnesses/takeover", post(api_harness_takeover))
+        .route("/api/v1/harnesses/restore-all", post(api_harness_restore_all))
         .route("/api/v1/harnesses/{id}/configure", post(api_harness_configure))
         .route("/api/v1/harnesses/{id}/restore", post(api_harness_restore))
+        // Token vault
+        .route("/api/v1/tokens", get(api_tokens_list))
+        .route("/api/v1/tokens/expiring", get(api_tokens_expiring))
         // Failover rules
         .route("/api/v1/rules", get(api_rules_list).post(api_rules_create))
         .route("/api/v1/rules/presets", get(api_rules_presets))
@@ -730,6 +756,19 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         // Model overrides
         .route("/api/v1/overrides", get(api_overrides_list))
         .route("/api/v1/overrides/{provider}/{model}", get(api_overrides_get).put(api_overrides_set).delete(api_overrides_clear))
+        // Response cache & mock provider
+        .route("/api/v1/cache/stats", get(api_cache_stats))
+        .route("/api/v1/cache/clear", post(api_cache_clear))
+        .route("/api/v1/mock/status", get(api_mock_status))
+        .route("/api/v1/mock/toggle", post(api_mock_toggle))
+        // Thinking optimizer
+        .route("/api/v1/thinking/status", get(api_thinking_status))
+        .route("/api/v1/thinking/config", put(api_thinking_config))
+        // MCP server management
+        .route("/api/v1/mcp/servers", get(api_mcp_servers).post(api_mcp_register))
+        .route("/api/v1/mcp/scan", post(api_mcp_scan))
+        .route("/api/v1/mcp/servers/{id}/toggle", post(api_mcp_toggle))
+        .route("/api/v1/mcp/servers/{id}", delete(api_mcp_remove))
         .route("/metrics", get(api_metrics))
         .layer(cors)
         .with_state(state);
@@ -1191,6 +1230,23 @@ async fn chat_completions(
         ).into_response();
     }
 
+    // Response cache check (deterministic requests only)
+    if state.response_cache.should_cache(request.temperature) {
+        let msgs_json: Vec<serde_json::Value> = request.messages.iter()
+            .filter_map(|m| serde_json::to_value(m).ok())
+            .collect();
+        let tools_json: Option<Vec<serde_json::Value>> = request.tools.clone();
+        let cache_key = ResponseCache::cache_key(
+            &request.model,
+            &msgs_json,
+            tools_json.as_deref(),
+        );
+        if let Some((cached_resp, _provider, _model)) = state.response_cache.get(&cache_key) {
+            info!("Response cache hit");
+            return Json(cached_resp).into_response();
+        }
+    }
+
     // 1. Score and route
     let t1 = Instant::now();
     let scoring = coalesce_core::router::route(&request, &state.config.routing);
@@ -1507,6 +1563,23 @@ async fn chat_completions(
             .into_response();
     }
 
+    // Thinking optimization: auto-enable extended thinking for capable models
+    let has_tools = request.tools.as_ref().map_or(false, |t| !t.is_empty());
+    let thinking_decision = state.thinking_optimizer.decide(
+        &request.model,
+        "", // provider not yet known — will refine per-candidate
+        scoring.score,
+        &scoring.tier,
+        has_tools,
+    );
+    if thinking_decision.enable_thinking {
+        debug!(
+            budget = ?thinking_decision.budget_tokens,
+            reason = thinking_decision.reason,
+            "Thinking optimizer: enabled"
+        );
+    }
+
     // 5. Fallback chain — try candidates in order
     let pre_fallback_ms = start.elapsed().as_millis();
     info!(candidates = candidates.len(), pre_fallback_ms = pre_fallback_ms, "Entering fallback loop");
@@ -1565,6 +1638,23 @@ async fn chat_completions(
                 forwarded_request.tool_choice = Some(
                     state.rosetta.translate_tool_choice_for_provider(&selected_model.provider, tc)
                 );
+            }
+        }
+
+        // Apply thinking optimizer decision per-model
+        let model_decision = state.thinking_optimizer.decide(
+            &forwarded_request.model,
+            &selected_model.provider,
+            scoring.score,
+            &scoring.tier,
+            has_tools,
+        );
+        if model_decision.enable_thinking {
+            if let Some(budget) = model_decision.budget_tokens {
+                forwarded_request.extra.insert("thinking".into(), serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                }));
             }
         }
 
@@ -1861,6 +1951,25 @@ async fn chat_completions(
                                 body,
                                 is_error: false,
                             });
+
+                            // Store in response cache for deterministic requests
+                            if state.response_cache.should_cache(request.temperature) {
+                                let msgs_json: Vec<serde_json::Value> = request.messages.iter()
+                                    .filter_map(|m| serde_json::to_value(m).ok())
+                                    .collect();
+                                let tools_json: Option<Vec<serde_json::Value>> = request.tools.clone();
+                                let cache_key = ResponseCache::cache_key(
+                                    &request.model,
+                                    &msgs_json,
+                                    tools_json.as_deref(),
+                                );
+                                state.response_cache.put(
+                                    cache_key,
+                                    response_json.clone(),
+                                    &selected_model.provider,
+                                    &selected_model.id,
+                                );
+                            }
 
                             return Json(response_json).into_response();
                         }
@@ -4402,6 +4511,42 @@ async fn api_harness_restore(
     Json(serde_json::json!(result))
 }
 
+/// POST /api/v1/harnesses/takeover — configure ALL detected harnesses at once
+async fn api_harness_takeover(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let proxy_url = format!("http://{}:{}", state.config.server.host, state.config.server.port);
+    let results = harness::takeover_all(&proxy_url);
+    Json(serde_json::json!({ "results": results }))
+}
+
+/// POST /api/v1/harnesses/restore-all — restore ALL harnesses to original config
+async fn api_harness_restore_all() -> Json<serde_json::Value> {
+    let results = harness::restore_all();
+    Json(serde_json::json!({ "results": results }))
+}
+
+// ---------------------------------------------------------------------------
+// Token vault endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/tokens — list all stored tokens (values redacted)
+async fn api_tokens_list(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let tokens = state.token_vault.list();
+    let entries: Vec<serde_json::Value> = tokens.iter().map(|(provider, token_type, valid)| {
+        serde_json::json!({
+            "provider": provider,
+            "type": format!("{:?}", token_type),
+            "valid": valid,
+        })
+    }).collect();
+    Json(serde_json::json!({ "tokens": entries, "count": entries.len() }))
+}
+
+/// GET /api/v1/tokens/expiring — tokens expiring within 15 minutes
+async fn api_tokens_expiring(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let expiring = state.token_vault.expiring_soon(std::time::Duration::from_secs(900));
+    Json(serde_json::json!({ "expiring_soon": expiring }))
+}
+
 // ---------------------------------------------------------------------------
 // Failover rules endpoints
 // ---------------------------------------------------------------------------
@@ -5798,6 +5943,199 @@ async fn api_overrides_clear(
         }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+
+// ── Response Cache API ──────────────────────────────────────────────────────
+
+/// GET /api/v1/cache/stats — return response cache statistics
+async fn api_cache_stats(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    Json(state.response_cache.stats_json())
+}
+
+/// POST /api/v1/cache/clear — flush the response cache
+async fn api_cache_clear(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    state.response_cache.clear();
+    Json(serde_json::json!({"cleared": true}))
+}
+
+// ── Mock Provider API ───────────────────────────────────────────────────────
+
+/// GET /api/v1/mock/status — check if mock provider is enabled
+async fn api_mock_status(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "enabled": state.mock_enabled.load(std::sync::atomic::Ordering::Relaxed),
+    }))
+}
+
+/// POST /api/v1/mock/toggle — enable/disable mock provider
+async fn api_mock_toggle(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let was = state.mock_enabled.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+    let now = !was;
+
+    if now {
+        // Add mock provider
+        let mock = MockProvider::default_provider();
+        if let Ok(models) = mock.list_models().await {
+            state.models.write().unwrap().extend(models);
+            state.providers.write().unwrap().push(Arc::new(mock));
+        }
+    } else {
+        // Remove mock provider
+        state.providers.write().unwrap().retain(|p| p.name() != "mock");
+        state.models.write().unwrap().retain(|m| m.provider != "mock");
+    }
+
+    Json(serde_json::json!({"enabled": now}))
+}
+
+/// GET /api/v1/thinking/status — current thinking optimizer configuration
+async fn api_thinking_status(
+    State(state): State<Arc<ProxyState>>,
+) -> Json<serde_json::Value> {
+    let config = &state.thinking_optimizer.config;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "min_complexity": config.min_complexity_for_thinking,
+        "max_budget_tokens": config.max_budget_tokens,
+        "default_budget_tokens": config.default_budget_tokens,
+    }))
+}
+
+/// PUT /api/v1/thinking/config — update thinking optimizer configuration
+async fn api_thinking_config(
+    State(state): State<Arc<ProxyState>>,
+    Json(_body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    // ThinkingOptimizer config is not behind a lock — return current config (read-only for now)
+    let config = &state.thinking_optimizer.config;
+    Json(serde_json::json!({
+        "enabled": config.enabled,
+        "min_complexity": config.min_complexity_for_thinking,
+        "max_budget_tokens": config.max_budget_tokens,
+        "default_budget_tokens": config.default_budget_tokens,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// MCP server management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/mcp/servers — list all registered MCP servers
+async fn api_mcp_servers(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let servers: Vec<serde_json::Value> = state.mcp_registry.list().iter().map(|s| {
+        serde_json::json!({
+            "id": s.config.id,
+            "name": s.config.name,
+            "transport": s.config.transport,
+            "status": s.status,
+            "tools": s.tools.iter().map(|t| serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+            })).collect::<Vec<_>>(),
+            "enabled": s.config.enabled,
+            "source": s.config.source,
+            "command": s.config.command,
+            "url": s.config.url,
+            "last_connected": s.last_connected,
+            "error": s.error,
+        })
+    }).collect();
+    Json(serde_json::json!({ "servers": servers }))
+}
+
+/// POST /api/v1/mcp/scan — scan for MCP server configs in known locations
+async fn api_mcp_scan(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let configs = McpScanner::scan_all();
+    let mut registered = 0;
+    for config in configs {
+        if state.mcp_registry.get(&config.id).is_none() {
+            state.mcp_registry.register(config);
+            registered += 1;
+        }
+    }
+    let servers: Vec<serde_json::Value> = state.mcp_registry.list().iter().map(|s| {
+        serde_json::json!({
+            "id": s.config.id,
+            "name": s.config.name,
+            "transport": s.config.transport,
+            "status": s.status,
+            "tools": s.tools.iter().map(|t| serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+            })).collect::<Vec<_>>(),
+            "enabled": s.config.enabled,
+            "source": s.config.source,
+            "command": s.config.command,
+            "url": s.config.url,
+            "last_connected": s.last_connected,
+            "error": s.error,
+        })
+    }).collect();
+    info!("MCP scan: found {} new servers", registered);
+    Json(serde_json::json!({ "servers": servers, "new": registered }))
+}
+
+/// POST /api/v1/mcp/servers/{id}/toggle — toggle a server's enabled state
+async fn api_mcp_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.mcp_registry.toggle(&id) {
+        Some(enabled) => Json(serde_json::json!({ "id": id, "enabled": enabled })),
+        None => Json(serde_json::json!({ "error": format!("Server '{}' not found", id) })),
+    }
+}
+
+/// DELETE /api/v1/mcp/servers/{id} — remove a server from the registry
+async fn api_mcp_remove(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.mcp_registry.unregister(&id) {
+        Some(_) => Json(serde_json::json!({ "ok": true, "removed": id })),
+        None => Json(serde_json::json!({ "error": format!("Server '{}' not found", id) })),
+    }
+}
+
+/// POST /api/v1/mcp/servers — register a new MCP server manually
+async fn api_mcp_register(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let name = body["name"].as_str().unwrap_or("unnamed").to_string();
+    let id = body["id"].as_str().map(String::from)
+        .unwrap_or_else(|| format!("manual-{}", name.to_lowercase().replace(' ', "-")));
+
+    let transport = match body["transport"].as_str().unwrap_or("stdio") {
+        "sse" => McpTransport::Sse,
+        "streamablehttp" | "streamable_http" => McpTransport::StreamableHttp,
+        "websocket" | "ws" => McpTransport::WebSocket,
+        "grpc" => McpTransport::Grpc,
+        "inprocess" | "in_process" => McpTransport::InProcess,
+        _ => McpTransport::Stdio,
+    };
+
+    let config = McpServerConfig {
+        id: id.clone(),
+        name,
+        transport,
+        command: body["command"].as_str().map(String::from),
+        args: body["args"].as_array().map(|a| {
+            a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+        }),
+        url: body["url"].as_str().map(String::from),
+        env: body["env"].as_object().map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        }),
+        enabled: true,
+        source: McpConfigSource::Manual,
+    };
+
+    state.mcp_registry.register(config);
+    Json(serde_json::json!({ "ok": true, "id": id }))
 }
 
 #[cfg(test)]

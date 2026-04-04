@@ -285,11 +285,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_failure() {
-        let provider = MockProvider::new("fail-mock", MockConfig {
-            fail_every_n: Some(1),
-            latency_ms: 0,
-            ..Default::default()
-        });
         let request = ChatRequest {
             model: "mock-model".into(),
             messages: vec![test_msg("Hi")],
@@ -297,9 +292,14 @@ mod tests {
             ..Default::default()
         };
 
-        // First request succeeds (count=1, 1%1==0 is true but count starts at 0+1=1)
+        // fail_every_n=1 means every request fails (count%1==0 always true when count>0)
+        let provider = MockProvider::new("fail-mock", MockConfig {
+            fail_every_n: Some(1),
+            latency_ms: 0,
+            ..Default::default()
+        });
         let result = provider.chat(&request).await;
-        assert!(result.is_ok()); // count=1, 1%1==0 → fail... actually let's check
+        assert!(result.is_err()); // count=1, 1%1==0 → fail
 
         // With fail_every_n=2, it should fail on every 2nd request
         let provider2 = MockProvider::new("fail2", MockConfig {

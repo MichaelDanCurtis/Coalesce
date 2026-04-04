@@ -10,6 +10,7 @@ import RoutingPlayground from "./components/RoutingPlayground";
 import RequestTimeline from "./components/RequestTimeline";
 import SystemPrompts from "./components/SystemPrompts";
 import EventStream from "./components/EventStream";
+import McpPanel from "./components/McpPanel";
 import Settings from "./components/Settings";
 import Chat from "./components/Chat";
 import { useTheme } from "./hooks/useTheme";
@@ -44,6 +45,8 @@ function App() {
         return <SystemPrompts />;
       case "events":
         return <EventStream />;
+      case "mcp":
+        return <McpPanel />;
       case "settings":
         return <Settings theme={theme} />;
     }

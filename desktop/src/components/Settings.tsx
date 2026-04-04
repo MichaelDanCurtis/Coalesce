@@ -133,6 +133,18 @@ export default function Settings({ theme }: { theme: ThemeHook }) {
       {/* Harness Configuration */}
       <HarnessConfig />
 
+      {/* Thinking Optimizer */}
+      <ThinkingStatus />
+
+      {/* Response Cache */}
+      <CacheStatus />
+
+      {/* Mock Provider */}
+      <MockProviderToggle />
+
+      {/* Token Vault */}
+      <TokenVault />
+
       {/* Auto-Failover Rules */}
       <FailoverRules />
 
@@ -272,6 +284,45 @@ function HarnessConfig() {
       <p className="text-xs text-secondary mb-4">
         Connect your AI coding tools to route through Coalesce. Each tool's config is backed up before changes.
       </p>
+
+      <div className="flex gap-2 mb-3">
+        <button
+          onClick={async () => {
+            setActionLoading("all");
+            try {
+              const result = await api.takeoverAllHarnesses();
+              const successes = result.results.filter((r: any) => r.success).length;
+              setMessage({ text: `Connected ${successes} tool(s)`, ok: successes > 0 });
+              await fetchHarnesses();
+            } catch (e: any) {
+              setMessage({ text: e.message || "Failed", ok: false });
+            }
+            setActionLoading(null);
+          }}
+          disabled={actionLoading !== null}
+          className="rounded-lg bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 transition-colors disabled:opacity-50"
+        >
+          {actionLoading === "all" ? "Connecting..." : "Connect All"}
+        </button>
+        <button
+          onClick={async () => {
+            setActionLoading("restore-all");
+            try {
+              const result = await api.restoreAllHarnesses();
+              const successes = result.results.filter((r: any) => r.success).length;
+              setMessage({ text: `Disconnected ${successes} tool(s)`, ok: true });
+              await fetchHarnesses();
+            } catch (e: any) {
+              setMessage({ text: e.message || "Failed", ok: false });
+            }
+            setActionLoading(null);
+          }}
+          disabled={actionLoading !== null}
+          className="rounded-lg border border-themed px-3 py-1.5 text-xs hover:border-red-500/50 hover:text-red-400 transition-colors disabled:opacity-50"
+        >
+          {actionLoading === "restore-all" ? "Disconnecting..." : "Disconnect All"}
+        </button>
+      </div>
 
       {message && (
         <div className={`rounded-lg px-3 py-2 text-xs mb-3 ${
@@ -583,6 +634,214 @@ function CreateRuleForm({ onSubmit, onCancel }: { onSubmit: (rule: any) => void;
         <button onClick={onCancel} className="rounded-lg border border-themed px-3 py-1.5 text-xs hover:border-brand-500/50 transition-colors">
           Cancel
         </button>
+      </div>
+    </div>
+  );
+}
+
+function ThinkingStatus() {
+  const [config, setConfig] = useState<{
+    enabled: boolean;
+    min_complexity: number;
+    max_budget_tokens: number;
+    default_budget_tokens: number;
+  } | null>(null);
+
+  useEffect(() => {
+    api.getThinkingStatus().then(setConfig).catch(() => {});
+  }, []);
+
+  if (!config) return null;
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">Thinking Optimizer</h3>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+          config.enabled
+            ? "bg-emerald-500/20 text-emerald-400"
+            : "bg-tertiary text-secondary"
+        }`}>
+          {config.enabled ? "Active" : "Disabled"}
+        </span>
+      </div>
+      <p className="text-xs text-secondary mb-4">
+        Auto-enables extended thinking for capable models based on request complexity.
+      </p>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold text-brand-400">{config.min_complexity}</p>
+          <p className="text-[10px] text-secondary mt-1">Min Complexity</p>
+        </div>
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold">{(config.default_budget_tokens / 1024).toFixed(0)}K</p>
+          <p className="text-[10px] text-secondary mt-1">Default Budget</p>
+        </div>
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold">{(config.max_budget_tokens / 1024).toFixed(0)}K</p>
+          <p className="text-[10px] text-secondary mt-1">Max Budget</p>
+        </div>
+      </div>
+      <div className="mt-3 rounded-lg bg-tertiary/50 p-2">
+        <p className="text-[10px] text-secondary">
+          Models with native thinking (Claude Opus/Sonnet, o1/o3) get full budgets.
+          ThinkingParam models (GLM 4.5+, DeepSeek-R1, Kimi) use the thinking parameter.
+          Simple tier requests skip thinking to save tokens.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function CacheStatus() {
+  const [stats, setStats] = useState<{
+    enabled: boolean;
+    entries: number;
+    max_entries: number;
+    ttl_secs: number;
+    total_hits: number;
+  } | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      setStats(await api.getCacheStats());
+    } catch {}
+  }, []);
+
+  useEffect(() => { fetchStats(); }, [fetchStats]);
+
+  const handleClear = async () => {
+    setClearing(true);
+    try {
+      await api.clearCache();
+      await fetchStats();
+    } catch {}
+    setClearing(false);
+  };
+
+  if (!stats) return null;
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">Response Cache</h3>
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+            stats.enabled
+              ? "bg-emerald-500/20 text-emerald-400"
+              : "bg-tertiary text-secondary"
+          }`}>
+            {stats.enabled ? "Active" : "Disabled"}
+          </span>
+          {stats.entries > 0 && (
+            <button
+              onClick={handleClear}
+              disabled={clearing}
+              className="rounded-lg border border-themed px-2 py-0.5 text-[10px] hover:border-red-500/50 hover:text-red-400 transition-colors disabled:opacity-50"
+            >
+              {clearing ? "Clearing..." : "Clear"}
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="text-xs text-secondary mb-3">
+        SHA256 content-hash cache for deterministic requests (temperature=0). Avoids duplicate API calls.
+      </p>
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold">{stats.entries}</p>
+          <p className="text-[10px] text-secondary mt-1">Cached</p>
+        </div>
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold">{stats.total_hits}</p>
+          <p className="text-[10px] text-secondary mt-1">Cache Hits</p>
+        </div>
+        <div className="rounded-lg border border-themed p-3 text-center">
+          <p className="text-lg font-semibold">{(stats.ttl_secs / 60).toFixed(0)}m</p>
+          <p className="text-[10px] text-secondary mt-1">TTL</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MockProviderToggle() {
+  const [enabled, setEnabled] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    api.getMockStatus().then(d => setEnabled(d.enabled)).catch(() => {});
+  }, []);
+
+  const toggle = async () => {
+    setLoading(true);
+    try {
+      const result = await api.toggleMock();
+      setEnabled(result.enabled);
+    } catch {}
+    setLoading(false);
+  };
+
+  return (
+    <div className="card">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium">Mock Provider</h3>
+          <p className="text-xs text-secondary mt-1">
+            Test provider generating synthetic responses. No API credits used.
+          </p>
+        </div>
+        <button
+          onClick={toggle}
+          disabled={loading}
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+            enabled ? "bg-brand-500" : "bg-tertiary"
+          }`}
+        >
+          <span
+            className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              enabled ? "translate-x-6" : "translate-x-1"
+            }`}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TokenVault() {
+  const [tokens, setTokens] = useState<Array<{ provider: string; type: string; valid: boolean }>>([]);
+  const [expiring, setExpiring] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.getTokens().then(d => setTokens(d.tokens)).catch(() => {});
+    api.getExpiringTokens().then(d => setExpiring(d.expiring_soon)).catch(() => {});
+  }, []);
+
+  if (tokens.length === 0 && expiring.length === 0) return null;
+
+  return (
+    <div className="card">
+      <h3 className="text-sm font-medium mb-2">Token Vault</h3>
+      <p className="text-xs text-secondary mb-3">Stored provider credentials and OAuth tokens.</p>
+
+      {expiring.length > 0 && (
+        <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-400 mb-3">
+          Expiring soon: {expiring.join(", ")}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {tokens.map((t) => (
+          <div key={t.provider} className="flex items-center justify-between rounded-lg border border-themed p-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">{t.provider}</span>
+              <span className="rounded bg-tertiary px-1.5 py-0.5 text-[10px] text-secondary">{t.type}</span>
+            </div>
+            <span className={`h-2 w-2 rounded-full ${t.valid ? "bg-emerald-400" : "bg-red-400"}`} />
+          </div>
+        ))}
       </div>
     </div>
   );

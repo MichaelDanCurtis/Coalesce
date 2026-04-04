@@ -13,6 +13,7 @@ const tabs = [
   { id: "timeline", labelKey: "nav.timeline" },
   { id: "prompts", labelKey: "nav.prompts" },
   { id: "events", labelKey: "nav.events" },
+  { id: "mcp", labelKey: "nav.mcp" },
   { id: "settings", labelKey: "nav.settings" },
 ] as const;
 

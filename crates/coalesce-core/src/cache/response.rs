@@ -161,6 +161,19 @@ impl ResponseCache {
             evictions: 0,
         }
     }
+
+    /// Return cache statistics as a JSON value (for API endpoints).
+    pub fn stats_json(&self) -> serde_json::Value {
+        let entries = self.entries.read().unwrap();
+        let hits: u64 = entries.values().map(|e| e.hit_count).sum();
+        serde_json::json!({
+            "enabled": self.config.enabled,
+            "entries": entries.len(),
+            "max_entries": self.config.max_entries,
+            "ttl_secs": self.config.ttl_secs,
+            "total_hits": hits,
+        })
+    }
 }
 
 #[cfg(test)]

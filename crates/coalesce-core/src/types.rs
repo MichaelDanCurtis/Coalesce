@@ -87,6 +87,24 @@ pub struct ImageUrl {
     pub detail: Option<String>,
 }
 
+impl Default for ChatRequest {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            messages: Vec::new(),
+            stream: false,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            extra: Default::default(),
+        }
+    }
+}
+
 /// OpenAI-compatible chat completion response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {

@@ -467,6 +467,35 @@ fn write_json(path: &PathBuf, value: &serde_json::Value) -> std::io::Result<()> 
     std::fs::write(path, json)
 }
 
+// ---------------------------------------------------------------------------
+// Takeover — configure ALL detected harnesses at once
+// ---------------------------------------------------------------------------
+
+pub fn takeover_all(proxy_url: &str) -> Vec<HarnessResult> {
+    let statuses = detect_all(proxy_url);
+    statuses.iter()
+        .filter(|s| s.installed && !s.configured)
+        .map(|s| configure_harness(&s.id, proxy_url))
+        .collect()
+}
+
+pub fn restore_all() -> Vec<HarnessResult> {
+    let ids = ["claude-code", "codex", "opencode"];
+    ids.iter()
+        .map(|id| restore_harness(id))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Crash recovery — detect stale Coalesce configs from dead proxy
+// ---------------------------------------------------------------------------
+
+pub fn check_stale_configs(proxy_url: &str) -> Vec<HarnessStatus> {
+    detect_all(proxy_url).into_iter()
+        .filter(|s| s.configured && s.backup_exists)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,5 +618,30 @@ mod tests {
 
         let result = restore_harness("unknown");
         assert!(!result.success);
+    }
+
+    #[test]
+    fn test_takeover_and_restore_all() {
+        with_home(|home| {
+            let proxy_url = "http://localhost:8401";
+            // Create .claude and .codex dirs
+            std::fs::create_dir_all(home.join(".claude")).unwrap();
+            std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            std::fs::write(home.join(".codex/config.json"), "{}").unwrap();
+
+            let results = takeover_all(proxy_url);
+            assert!(results.len() >= 2);
+            assert!(results.iter().all(|r| r.success));
+
+            let statuses = detect_all(proxy_url);
+            let configured_count = statuses.iter().filter(|s| s.configured).count();
+            assert!(configured_count >= 2);
+
+            let restore_results = restore_all();
+            // At least the ones we configured should succeed
+            let success_count = restore_results.iter().filter(|r| r.success).count();
+            assert!(success_count >= 2);
+        });
     }
 }

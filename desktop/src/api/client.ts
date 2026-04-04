@@ -451,4 +451,73 @@ export const api = {
     );
     return resp.json();
   },
+
+  // --- Cache ---
+  async getCacheStats() {
+    return httpGet<{ enabled: boolean; entries: number; max_entries: number; ttl_secs: number; total_hits: number }>("/api/v1/cache/stats");
+  },
+
+  async clearCache() {
+    return httpPost<{ cleared: boolean }>("/api/v1/cache/clear", {});
+  },
+
+  // --- Mock Provider ---
+  async getMockStatus() {
+    return httpGet<{ enabled: boolean }>("/api/v1/mock/status");
+  },
+
+  async toggleMock() {
+    return httpPost<{ enabled: boolean }>("/api/v1/mock/toggle", {});
+  },
+
+  // --- Thinking Optimizer ---
+  async getThinkingStatus() {
+    return httpGet<{ enabled: boolean; min_complexity: number; max_budget_tokens: number; default_budget_tokens: number }>("/api/v1/thinking/status");
+  },
+
+  // --- Tokens ---
+  async getTokens() {
+    return httpGet<{ tokens: Array<{ provider: string; type: string; valid: boolean }>; count: number }>("/api/v1/tokens");
+  },
+
+  async getExpiringTokens() {
+    return httpGet<{ expiring_soon: string[] }>("/api/v1/tokens/expiring");
+  },
+
+  // --- Harness Takeover ---
+  async takeoverAllHarnesses() {
+    return httpPost<{ results: Array<{ success: boolean; message: string; harness_id: string }> }>("/api/v1/harnesses/takeover", {});
+  },
+
+  async restoreAllHarnesses() {
+    return httpPost<{ results: Array<{ success: boolean; message: string; harness_id: string }> }>("/api/v1/harnesses/restore-all", {});
+  },
+
+  // --- MCP Servers ---
+  async getMcpServers() {
+    return httpGet<{ servers: Array<{
+      id: string; name: string; transport: string; status: string;
+      tools: Array<{ name: string; description?: string }>;
+      enabled: boolean; source: string; command?: string; url?: string;
+      last_connected?: number; error?: string;
+    }> }>("/api/v1/mcp/servers");
+  },
+
+  async scanMcpServers() {
+    return httpPost<{ servers: Array<any> }>("/api/v1/mcp/scan", {});
+  },
+
+  async toggleMcpServer(id: string) {
+    return httpPost<{ enabled: boolean }>(`/api/v1/mcp/servers/${id}/toggle`, {});
+  },
+
+  async registerMcpServer(server: { name: string; transport: string; command?: string; args?: string[]; url?: string }) {
+    return httpPost<{ ok: boolean; id: string }>("/api/v1/mcp/servers", server);
+  },
+
+  async removeMcpServer(id: string) {
+    const resp = await fetch(`${PROXY_BASE}/api/v1/mcp/servers/${id}`, { method: "DELETE" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return resp.json();
+  },
 };
