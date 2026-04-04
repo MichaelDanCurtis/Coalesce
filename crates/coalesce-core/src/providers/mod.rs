@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod copilot;
 pub mod google_cloudcode;
 pub mod health;
+pub mod mock;
 pub mod ollama;
 pub mod openai_compat;
 pub mod openrouter;

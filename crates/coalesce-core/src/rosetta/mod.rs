@@ -10,6 +10,7 @@
 
 pub mod types;
 pub mod thinking;
+pub mod thinking_optimizer;
 pub mod equivalence;
 pub mod capabilities;
 pub mod adapter;
