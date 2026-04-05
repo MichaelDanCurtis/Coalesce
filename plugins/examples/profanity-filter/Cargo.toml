@@ -1,0 +1,11 @@
+[package]
+name = "profanity-filter"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+coalesce-plugin-sdk = { path = "../../../crates/coalesce-plugin-sdk" }
+serde_json = "1"

@@ -3,6 +3,7 @@ members = [
     "crates/coalesce-core",
     "crates/coalesce-proxy",
     "crates/coalesce-cli",
+    "crates/coalesce-plugin-sdk",
     "desktop/src-tauri",
 ]
 resolver = "2"
