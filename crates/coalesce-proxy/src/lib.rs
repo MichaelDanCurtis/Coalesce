@@ -759,6 +759,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         // Response cache & mock provider
         .route("/api/v1/cache/stats", get(api_cache_stats))
         .route("/api/v1/cache/clear", post(api_cache_clear))
+        .route("/api/v1/cache/config", put(api_cache_config))
         .route("/api/v1/mock/status", get(api_mock_status))
         .route("/api/v1/mock/toggle", post(api_mock_toggle))
         // Thinking optimizer
@@ -5959,6 +5960,17 @@ async fn api_cache_clear(State(state): State<Arc<ProxyState>>) -> Json<serde_jso
     Json(serde_json::json!({"cleared": true}))
 }
 
+/// PUT /api/v1/cache/config — toggle response cache enabled/disabled at runtime
+async fn api_cache_config(
+    State(state): State<Arc<ProxyState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        state.response_cache.set_enabled(enabled);
+    }
+    Json(state.response_cache.stats_json())
+}
+
 // ── Mock Provider API ───────────────────────────────────────────────────────
 
 /// GET /api/v1/mock/status — check if mock provider is enabled
@@ -5995,22 +6007,24 @@ async fn api_thinking_status(
 ) -> Json<serde_json::Value> {
     let config = &state.thinking_optimizer.config;
     Json(serde_json::json!({
-        "enabled": config.enabled,
+        "enabled": state.thinking_optimizer.is_enabled(),
         "min_complexity": config.min_complexity_for_thinking,
         "max_budget_tokens": config.max_budget_tokens,
         "default_budget_tokens": config.default_budget_tokens,
     }))
 }
 
-/// PUT /api/v1/thinking/config — update thinking optimizer configuration
+/// PUT /api/v1/thinking/config — toggle thinking optimizer enabled/disabled at runtime
 async fn api_thinking_config(
     State(state): State<Arc<ProxyState>>,
-    Json(_body): Json<serde_json::Value>,
+    Json(body): Json<serde_json::Value>,
 ) -> Json<serde_json::Value> {
-    // ThinkingOptimizer config is not behind a lock — return current config (read-only for now)
+    if let Some(enabled) = body.get("enabled").and_then(|v| v.as_bool()) {
+        state.thinking_optimizer.set_enabled(enabled);
+    }
     let config = &state.thinking_optimizer.config;
     Json(serde_json::json!({
-        "enabled": config.enabled,
+        "enabled": state.thinking_optimizer.is_enabled(),
         "min_complexity": config.min_complexity_for_thinking,
         "max_budget_tokens": config.max_budget_tokens,
         "default_budget_tokens": config.default_budget_tokens,

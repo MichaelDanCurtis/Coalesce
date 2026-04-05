@@ -1,6 +1,7 @@
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// SHA256 content-based response cache with configurable TTL.
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 pub struct ResponseCache {
     entries: RwLock<HashMap<String, CacheEntry>>,
     config: ResponseCacheConfig,
+    enabled: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -22,7 +24,7 @@ pub struct ResponseCacheConfig {
 impl Default for ResponseCacheConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             max_entries: 5000,
             ttl_secs: 1800, // 30 min
             deterministic_only: true,
@@ -48,10 +50,22 @@ pub struct CacheStats {
 
 impl ResponseCache {
     pub fn new(config: ResponseCacheConfig) -> Self {
+        let enabled = AtomicBool::new(config.enabled);
         Self {
             entries: RwLock::new(HashMap::new()),
             config,
+            enabled,
         }
+    }
+
+    /// Toggle the cache on or off at runtime.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check whether the cache is currently enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// Generate a SHA256 cache key from model + messages.
@@ -74,7 +88,7 @@ impl ResponseCache {
 
     /// Look up a cached response by key.
     pub fn get(&self, key: &str) -> Option<(serde_json::Value, String, String)> {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return None;
         }
 
@@ -95,7 +109,7 @@ impl ResponseCache {
 
     /// Store a response in the cache.
     pub fn put(&self, key: String, response: serde_json::Value, provider: &str, model: &str) {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return;
         }
 
@@ -127,7 +141,7 @@ impl ResponseCache {
 
     /// Check if a request should be cached based on temperature.
     pub fn should_cache(&self, temperature: Option<f64>) -> bool {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return false;
         }
         if self.config.deterministic_only {
@@ -167,7 +181,7 @@ impl ResponseCache {
         let entries = self.entries.read().unwrap();
         let hits: u64 = entries.values().map(|e| e.hit_count).sum();
         serde_json::json!({
-            "enabled": self.config.enabled,
+            "enabled": self.is_enabled(),
             "entries": entries.len(),
             "max_entries": self.config.max_entries,
             "ttl_secs": self.config.ttl_secs,

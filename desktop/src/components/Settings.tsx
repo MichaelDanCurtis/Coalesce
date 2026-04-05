@@ -646,10 +646,21 @@ function ThinkingStatus() {
     max_budget_tokens: number;
     default_budget_tokens: number;
   } | null>(null);
+  const [toggling, setToggling] = useState(false);
 
   useEffect(() => {
     api.getThinkingStatus().then(setConfig).catch(() => {});
   }, []);
+
+  const handleToggle = async () => {
+    if (!config) return;
+    setToggling(true);
+    try {
+      const updated = await api.toggleThinking(!config.enabled);
+      setConfig(updated);
+    } catch {}
+    setToggling(false);
+  };
 
   if (!config) return null;
 
@@ -657,13 +668,17 @@ function ThinkingStatus() {
     <div className="card">
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium">Thinking Optimizer</h3>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-          config.enabled
-            ? "bg-emerald-500/20 text-emerald-400"
-            : "bg-tertiary text-secondary"
-        }`}>
-          {config.enabled ? "Active" : "Disabled"}
-        </span>
+        <button
+          onClick={handleToggle}
+          disabled={toggling}
+          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+            config.enabled ? "bg-brand-500" : "bg-tertiary"
+          }`}
+        >
+          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+            config.enabled ? "translate-x-6" : "translate-x-1"
+          }`} />
+        </button>
       </div>
       <p className="text-xs text-secondary mb-4">
         Auto-enables extended thinking for capable models based on request complexity.
@@ -702,6 +717,7 @@ function CacheStatus() {
     total_hits: number;
   } | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [toggling, setToggling] = useState(false);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -720,6 +736,16 @@ function CacheStatus() {
     setClearing(false);
   };
 
+  const handleToggle = async () => {
+    if (!stats) return;
+    setToggling(true);
+    try {
+      const updated = await api.toggleCache(!stats.enabled);
+      setStats(updated);
+    } catch {}
+    setToggling(false);
+  };
+
   if (!stats) return null;
 
   return (
@@ -727,13 +753,17 @@ function CacheStatus() {
       <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-medium">Response Cache</h3>
         <div className="flex items-center gap-2">
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-            stats.enabled
-              ? "bg-emerald-500/20 text-emerald-400"
-              : "bg-tertiary text-secondary"
-          }`}>
-            {stats.enabled ? "Active" : "Disabled"}
-          </span>
+          <button
+            onClick={handleToggle}
+            disabled={toggling}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              stats.enabled ? "bg-brand-500" : "bg-tertiary"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+              stats.enabled ? "translate-x-6" : "translate-x-1"
+            }`} />
+          </button>
           {stats.entries > 0 && (
             <button
               onClick={handleClear}

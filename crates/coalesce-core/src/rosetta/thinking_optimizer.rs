@@ -1,9 +1,11 @@
 use crate::types::QualityTier;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Thinking optimizer — auto-configures extended thinking based on model,
 /// complexity score, and budget constraints.
 pub struct ThinkingOptimizer {
     pub config: ThinkingOptimizerConfig,
+    enabled: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +55,18 @@ pub enum ThinkingCapability {
 
 impl ThinkingOptimizer {
     pub fn new(config: ThinkingOptimizerConfig) -> Self {
-        Self { config }
+        let enabled = AtomicBool::new(config.enabled);
+        Self { config, enabled }
+    }
+
+    /// Toggle the optimizer on or off at runtime.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check whether the optimizer is currently enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
     }
 
     /// Decide whether to enable thinking for a given request context.
@@ -65,7 +78,7 @@ impl ThinkingOptimizer {
         tier: &QualityTier,
         has_tools: bool,
     ) -> ThinkingDecision {
-        if !self.config.enabled {
+        if !self.is_enabled() {
             return ThinkingDecision {
                 enable_thinking: false,
                 budget_tokens: None,

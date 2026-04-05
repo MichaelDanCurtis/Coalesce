@@ -27,6 +27,16 @@ async function httpPost<T>(path: string, body: unknown): Promise<T> {
   return resp.json();
 }
 
+async function httpPut<T>(path: string, body: unknown): Promise<T> {
+  const resp = await fetch(`${PROXY_BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+  return resp.json();
+}
+
 export const api = {
   async getProviders() {
     if (isTauri()) return tauriInvoke("get_providers");
@@ -461,6 +471,10 @@ export const api = {
     return httpPost<{ cleared: boolean }>("/api/v1/cache/clear", {});
   },
 
+  async toggleCache(enabled: boolean) {
+    return httpPut<{ enabled: boolean; entries: number; max_entries: number; ttl_secs: number; total_hits: number }>("/api/v1/cache/config", { enabled });
+  },
+
   // --- Mock Provider ---
   async getMockStatus() {
     return httpGet<{ enabled: boolean }>("/api/v1/mock/status");
@@ -473,6 +487,10 @@ export const api = {
   // --- Thinking Optimizer ---
   async getThinkingStatus() {
     return httpGet<{ enabled: boolean; min_complexity: number; max_budget_tokens: number; default_budget_tokens: number }>("/api/v1/thinking/status");
+  },
+
+  async toggleThinking(enabled: boolean) {
+    return httpPut<{ enabled: boolean; min_complexity: number; max_budget_tokens: number; default_budget_tokens: number }>("/api/v1/thinking/config", { enabled });
   },
 
   // --- Tokens ---
