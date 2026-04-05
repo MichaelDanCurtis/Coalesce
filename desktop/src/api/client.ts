@@ -37,6 +37,12 @@ async function httpPut<T>(path: string, body: unknown): Promise<T> {
   return resp.json();
 }
 
+async function httpDelete<T>(path: string): Promise<T> {
+  const resp = await fetch(`${PROXY_BASE}${path}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+  return resp.json();
+}
+
 export const api = {
   async getProviders() {
     if (isTauri()) return tauriInvoke("get_providers");
@@ -537,5 +543,47 @@ export const api = {
     const resp = await fetch(`${PROXY_BASE}/api/v1/mcp/servers/${id}`, { method: "DELETE" });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.json();
+  },
+
+  // --- Skills ---
+  async getSkills() {
+    return httpGet<{ skills: Array<{ id: string; name: string; version: string; description: string; author?: string; source: any; enabled: boolean; harnesses: string[]; content: any; installed_at: string }>; count: number }>("/api/v1/skills");
+  },
+  async installSkill(skill: any) {
+    return httpPost<any>("/api/v1/skills", skill);
+  },
+  async removeSkill(id: string) {
+    return httpDelete<any>(`/api/v1/skills/${id}`);
+  },
+  async toggleSkill(id: string) {
+    return httpPost<any>(`/api/v1/skills/${id}/toggle`, {});
+  },
+  async toggleSkillHarness(id: string, harness: string) {
+    return httpPost<any>(`/api/v1/skills/${id}/harness/${harness}`, {});
+  },
+
+  // --- Plugins ---
+  async getPlugins() {
+    return httpGet<{ plugins: Array<{ enabled: boolean; path: string; config: any }>; count: number }>("/api/v1/plugins");
+  },
+  async scanPlugins() {
+    return httpPost<{ plugins: Array<{ enabled: boolean; path: string; config: any }>; count: number }>("/api/v1/plugins/scan", {});
+  },
+  async togglePlugin(name: string) {
+    return httpPost<any>(`/api/v1/plugins/${name}/toggle`, {});
+  },
+
+  // --- Cloud Sync ---
+  async getSyncStatus() {
+    return httpGet<{ enabled: boolean; method: string; last_sync?: string; device_id: string; files_synced: number; conflicts: any[] }>("/api/v1/sync/status");
+  },
+  async getSyncConfig() {
+    return httpGet<any>("/api/v1/sync/config");
+  },
+  async updateSyncConfig(config: any) {
+    return httpPut<any>("/api/v1/sync/config", config);
+  },
+  async syncNow() {
+    return httpPost<any>("/api/v1/sync/now", {});
   },
 };

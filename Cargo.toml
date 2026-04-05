@@ -64,6 +64,7 @@ async-trait = "0.1"
 pdf_oxide = { version = "0.3", features = ["parallel"] }
 tempfile = "3"
 base64 = "0.22"
+wasmtime = "29"
 
 # gRPC
 tonic = "0.12"

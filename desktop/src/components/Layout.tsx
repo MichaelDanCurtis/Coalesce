@@ -14,6 +14,9 @@ const tabs = [
   { id: "prompts", labelKey: "nav.prompts" },
   { id: "events", labelKey: "nav.events" },
   { id: "mcp", labelKey: "nav.mcp" },
+  { id: "skills", labelKey: "nav.skills" },
+  { id: "plugins", labelKey: "nav.plugins" },
+  { id: "sync", labelKey: "nav.sync" },
   { id: "settings", labelKey: "nav.settings" },
 ] as const;
 

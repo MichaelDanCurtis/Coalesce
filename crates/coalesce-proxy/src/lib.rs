@@ -23,6 +23,8 @@ use coalesce_core::cache::response::{ResponseCache, ResponseCacheConfig};
 use coalesce_core::providers::mock::MockProvider;
 use coalesce_core::rosetta::RosettaContext;
 use coalesce_core::mcp::{McpRegistry, McpScanner, McpServerConfig, McpTransport, McpConfigSource};
+use coalesce_core::skills::registry::SkillRegistry;
+use coalesce_core::sync::engine::SyncEngine;
 use coalesce_core::rosetta::thinking_optimizer::{ThinkingOptimizer, ThinkingOptimizerConfig};
 use coalesce_core::storage::{RequestLogEntry, Storage};
 use coalesce_core::types::{ChatRequest, ContentPart, Message, MessageContent, ModelInfo, QualityTier, derive_canonical_family};
@@ -227,6 +229,12 @@ pub struct ProxyState {
     pub mcp_registry: McpRegistry,
     /// Mock provider enabled flag
     pub mock_enabled: std::sync::atomic::AtomicBool,
+    /// Plugin host for WASM and built-in plugins
+    pub plugin_host: RwLock<coalesce_core::plugins::host::PluginHost>,
+    /// Skills registry
+    pub skills: SkillRegistry,
+    /// Cloud/local sync engine
+    pub sync_engine: SyncEngine,
 }
 
 impl ProxyState {
@@ -389,6 +397,9 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         response_cache: ResponseCache::new(ResponseCacheConfig::default()),
         mcp_registry: McpRegistry::new(),
         mock_enabled: std::sync::atomic::AtomicBool::new(false),
+        plugin_host: RwLock::new(coalesce_core::plugins::host::PluginHost::new()),
+        skills: SkillRegistry::new(),
+        sync_engine: SyncEngine::new(),
     });
 
     // Load disabled providers/models from DB
@@ -770,6 +781,19 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/mcp/scan", post(api_mcp_scan))
         .route("/api/v1/mcp/servers/{id}/toggle", post(api_mcp_toggle))
         .route("/api/v1/mcp/servers/{id}", delete(api_mcp_remove))
+        // Skills management
+        .route("/api/v1/skills", get(api_skills_list).post(api_skill_install))
+        .route("/api/v1/skills/{id}", get(api_skill_get).delete(api_skill_uninstall))
+        .route("/api/v1/skills/{id}/toggle", post(api_skill_toggle))
+        .route("/api/v1/skills/{id}/harness/{harness}", post(api_skill_toggle_harness))
+        // Cloud/local sync
+        .route("/api/v1/sync/status", get(api_sync_status))
+        .route("/api/v1/sync/config", get(api_sync_config_get).put(api_sync_configure))
+        .route("/api/v1/sync/now", post(api_sync_now))
+        // Plugin management
+        .route("/api/v1/plugins", get(api_plugins_list))
+        .route("/api/v1/plugins/scan", post(api_plugins_scan))
+        .route("/api/v1/plugins/{name}/toggle", post(api_plugin_toggle))
         .route("/metrics", get(api_metrics))
         .layer(cors)
         .with_state(state);
@@ -6110,6 +6134,175 @@ async fn api_mcp_remove(
         Some(_) => Json(serde_json::json!({ "ok": true, "removed": id })),
         None => Json(serde_json::json!({ "error": format!("Server '{}' not found", id) })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Skills management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/skills — list all installed skills
+async fn api_skills_list(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let skills = state.skills.list();
+    Json(serde_json::json!({ "skills": skills, "count": skills.len() }))
+}
+
+/// POST /api/v1/skills — install a new skill
+async fn api_skill_install(
+    State(state): State<Arc<ProxyState>>,
+    Json(skill): Json<coalesce_core::skills::types::Skill>,
+) -> Json<serde_json::Value> {
+    match state.skills.install(skill) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// GET /api/v1/skills/{id} — get a single skill
+async fn api_skill_get(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.skills.get(&id) {
+        Some(skill) => Json(serde_json::json!(skill)),
+        None => Json(serde_json::json!({ "error": format!("skill '{}' not found", id) })),
+    }
+}
+
+/// DELETE /api/v1/skills/{id} — uninstall a skill
+async fn api_skill_uninstall(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.skills.uninstall(&id) {
+        Ok(skill) => Json(serde_json::json!({ "ok": true, "removed": skill.id })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/v1/skills/{id}/toggle — toggle enabled state
+async fn api_skill_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    match state.skills.toggle(&id) {
+        Ok(enabled) => Json(serde_json::json!({ "id": id, "enabled": enabled })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/v1/skills/{id}/harness/{harness} — toggle harness association
+async fn api_skill_toggle_harness(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath((id, harness)): AxumPath<(String, String)>,
+) -> Json<serde_json::Value> {
+    match state.skills.toggle_harness(&id, &harness) {
+        Ok(()) => Json(serde_json::json!({ "ok": true, "skill": id, "harness": harness })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cloud/local sync endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/sync/status — current sync status
+async fn api_sync_status(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let status = state.sync_engine.status();
+    Json(serde_json::json!(status))
+}
+
+/// GET /api/v1/sync/config — current sync configuration
+async fn api_sync_config_get(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    let config = state.sync_engine.get_config();
+    Json(serde_json::json!(config))
+}
+
+/// PUT /api/v1/sync/config — update sync configuration
+async fn api_sync_configure(
+    State(state): State<Arc<ProxyState>>,
+    Json(config): Json<coalesce_core::sync::types::SyncConfig>,
+) -> Json<serde_json::Value> {
+    match state.sync_engine.configure(config) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+/// POST /api/v1/sync/now — trigger sync
+async fn api_sync_now(State(state): State<Arc<ProxyState>>) -> Json<serde_json::Value> {
+    match state.sync_engine.sync_now() {
+        Ok(status) => Json(serde_json::json!(status)),
+        Err(e) => Json(serde_json::json!({ "error": e })),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/plugins — list all discovered plugin configs
+async fn api_plugins_list(
+    State(_state): State<Arc<ProxyState>>,
+) -> Json<serde_json::Value> {
+    let configs = coalesce_core::plugins::loader::discover_plugins();
+    let list: Vec<serde_json::Value> = configs
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "path": c.path.display().to_string(),
+                "enabled": c.enabled,
+                "config": c.config,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "plugins": list }))
+}
+
+/// POST /api/v1/plugins/scan — re-scan the plugin directory
+async fn api_plugins_scan(
+    State(_state): State<Arc<ProxyState>>,
+) -> Json<serde_json::Value> {
+    let configs = coalesce_core::plugins::loader::discover_plugins();
+    let count = configs.len();
+    let list: Vec<serde_json::Value> = configs
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "path": c.path.display().to_string(),
+                "enabled": c.enabled,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "scanned": count, "plugins": list }))
+}
+
+/// POST /api/v1/plugins/{name}/toggle — toggle a plugin on/off by name
+async fn api_plugin_toggle(
+    State(state): State<Arc<ProxyState>>,
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let host = state.plugin_host.read().unwrap();
+    let found = host.plugins().iter().any(|p| p.manifest().name == name);
+    drop(host);
+
+    if !found {
+        return Json(serde_json::json!({ "error": format!("Plugin '{}' not found", name) }));
+    }
+
+    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let key = format!("plugin_disabled:{name}");
+
+    if enabled {
+        let _ = state.storage.set(&key, "");
+    } else {
+        let _ = state.storage.set(&key, "1");
+    }
+
+    Json(serde_json::json!({
+        "plugin": name,
+        "enabled": enabled,
+    }))
 }
 
 /// POST /api/v1/mcp/servers — register a new MCP server manually

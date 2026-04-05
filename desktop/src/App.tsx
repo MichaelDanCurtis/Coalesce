@@ -11,6 +11,9 @@ import RequestTimeline from "./components/RequestTimeline";
 import SystemPrompts from "./components/SystemPrompts";
 import EventStream from "./components/EventStream";
 import McpPanel from "./components/McpPanel";
+import SkillsPanel from "./components/SkillsPanel";
+import PluginsPanel from "./components/PluginsPanel";
+import CloudSync from "./components/CloudSync";
 import Settings from "./components/Settings";
 import Chat from "./components/Chat";
 import { useTheme } from "./hooks/useTheme";
@@ -47,6 +50,12 @@ function App() {
         return <EventStream />;
       case "mcp":
         return <McpPanel />;
+      case "skills":
+        return <SkillsPanel />;
+      case "plugins":
+        return <PluginsPanel />;
+      case "sync":
+        return <CloudSync />;
       case "settings":
         return <Settings theme={theme} />;
     }

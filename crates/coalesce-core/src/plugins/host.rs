@@ -42,6 +42,11 @@ impl PluginHost {
         self.plugins.len()
     }
 
+    /// Return a reference to the registered plugins.
+    pub fn plugins(&self) -> &[Arc<dyn Plugin>] {
+        &self.plugins
+    }
+
     /// Run all `on_request` hooks. Returns modified request or Block error.
     pub fn run_on_request(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
         let mut current = request.clone();

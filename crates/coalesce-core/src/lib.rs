@@ -12,3 +12,5 @@ pub mod plugins;
 pub mod sanitize;
 pub mod presets;
 pub mod mcp;
+pub mod skills;
+pub mod sync;

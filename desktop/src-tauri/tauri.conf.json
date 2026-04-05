@@ -45,6 +45,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["coalesce"]
+      }
+    },
     "updater": {
       "pubkey": "",
       "endpoints": [

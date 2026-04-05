@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::Manager;
+use tauri::{Listener, Manager};
+use tauri_plugin_deep_link::DeepLinkExt;
 
 mod commands;
+mod deep_link;
 mod proxy_bridge;
 mod tray;
 
@@ -23,6 +25,7 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             // Create system tray
             tray::create_tray(app.handle())?;
@@ -32,6 +35,24 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 proxy_bridge::start_health_polling(handle).await;
             });
+
+            // Deep link handler
+            #[cfg(not(target_os = "linux"))]
+            {
+                app.listen("deep-link://new-url", move |event: tauri::Event| {
+                    let payload = event.payload();
+                    if let Some(action) = deep_link::parse_deep_link(payload) {
+                        tauri::async_runtime::spawn(async move {
+                            match deep_link::execute_action(action).await {
+                                Ok(msg) => tracing::info!("Deep link executed: {}", msg),
+                                Err(e) => tracing::error!("Deep link failed: {}", e),
+                            }
+                        });
+                    }
+                });
+                // Register the deep link scheme
+                let _ = app.deep_link().register("coalesce");
+            }
 
             Ok(())
         })

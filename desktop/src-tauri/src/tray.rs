@@ -6,6 +6,8 @@ use tauri::{
 };
 use serde::Deserialize;
 
+const PROXY_BASE: &str = "http://127.0.0.1:8402";
+
 #[derive(Debug, Deserialize, Default)]
 pub struct HealthData {
     #[serde(default)]
@@ -16,6 +18,12 @@ pub struct HealthData {
     pub total_requests: u64,
     #[serde(default)]
     pub total_savings_usd: f64,
+    #[serde(default)]
+    pub disabled_providers: Vec<String>,
+    #[serde(default)]
+    pub cache_enabled: bool,
+    #[serde(default)]
+    pub mock_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,14 +69,14 @@ fn build_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<tauri::men
             .build(app)?;
         builder = builder.item(&status);
 
-        // Provider list
+        // Provider list with toggle capability
         for p in &h.providers {
-            let icon = if p.status == "ok" { "+" } else { "x" };
+            let is_disabled = h.disabled_providers.contains(&p.name);
+            let icon = if is_disabled { "[ ]" } else if p.status == "ok" { "[x]" } else { "[!]" };
             let item = MenuItemBuilder::with_id(
-                format!("provider_{}", p.name),
+                format!("toggle_{}", p.name),
                 format!("  {} {}", icon, p.name),
             )
-            .enabled(false)
             .build(app)?;
             builder = builder.item(&item);
         }
@@ -90,6 +98,22 @@ fn build_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<tauri::men
                 .build(app)?;
             builder = builder.item(&reqs);
         }
+
+        let sep = PredefinedMenuItem::separator(app)?;
+        builder = builder.item(&sep);
+
+        // Quick actions section
+        let cache_label = if h.cache_enabled { "Cache: On" } else { "Cache: Off" };
+        let mock_label = if h.mock_enabled { "Mock: On" } else { "Mock: Off" };
+
+        let clear_cache = MenuItemBuilder::with_id("clear_cache", "Clear Cache").build(app)?;
+        let toggle_mock = MenuItemBuilder::with_id("toggle_mock", mock_label).build(app)?;
+        let cache_status = MenuItemBuilder::with_id("cache_status", cache_label)
+            .enabled(false)
+            .build(app)?;
+        builder = builder.item(&clear_cache);
+        builder = builder.item(&toggle_mock);
+        builder = builder.item(&cache_status);
 
         let sep = PredefinedMenuItem::separator(app)?;
         builder = builder.item(&sep);
@@ -115,7 +139,8 @@ fn build_tray_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<(), B
         .menu(&menu)
         .tooltip("Coalesce - LLM Router")
         .on_menu_event(move |app, event| {
-            match event.id().as_ref() {
+            let id = event.id().as_ref().to_string();
+            match id.as_str() {
                 "open" => {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
@@ -125,7 +150,31 @@ fn build_tray_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<(), B
                 "quit" => {
                     app.exit(0);
                 }
-                _ => {}
+                "clear_cache" => {
+                    tauri::async_runtime::spawn(async {
+                        let client = reqwest::Client::new();
+                        let _ = client.post(format!("{}/api/v1/cache/clear", PROXY_BASE))
+                            .send()
+                            .await;
+                    });
+                }
+                "toggle_mock" => {
+                    tauri::async_runtime::spawn(async {
+                        let client = reqwest::Client::new();
+                        let _ = client.post(format!("{}/api/v1/mock/toggle", PROXY_BASE))
+                            .send()
+                            .await;
+                    });
+                }
+                _ => {
+                    if let Some(provider_name) = id.strip_prefix("toggle_") {
+                        let name = provider_name.to_string();
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            toggle_provider(&name, &handle).await;
+                        });
+                    }
+                }
             }
         })
         .on_tray_icon_event(|tray, event| {
@@ -145,4 +194,44 @@ fn build_tray_menu(app: &AppHandle, health: Option<&HealthData>) -> Result<(), B
         .build(app)?;
 
     Ok(())
+}
+
+/// Toggle a provider on/off by querying current state then flipping it.
+async fn toggle_provider(name: &str, app: &AppHandle) {
+    let client = reqwest::Client::new();
+
+    // First, check current state from providers API
+    let is_currently_disabled = match client
+        .get(format!("{}/api/v1/providers", PROXY_BASE))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                json.as_array()
+                    .and_then(|arr| {
+                        arr.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+                    })
+                    .and_then(|p| p.get("is_disabled"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    };
+
+    // Toggle: if currently disabled, enable it; if enabled, disable it
+    let new_enabled = is_currently_disabled;
+    let body = serde_json::json!({ "enabled": new_enabled });
+    let _ = client
+        .post(format!("{}/api/v1/providers/{}/toggle", PROXY_BASE, name))
+        .json(&body)
+        .send()
+        .await;
+
+    // Trigger a tray refresh by fetching health and updating
+    let health = crate::proxy_bridge::fetch_health_data().await;
+    let _ = crate::tray::update_tray_menu(app, &health);
 }
