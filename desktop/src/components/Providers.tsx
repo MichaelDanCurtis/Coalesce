@@ -42,6 +42,8 @@ export default function Providers() {
   const [editingModel, setEditingModel] = useState<any>(null);
   const [editOverrides, setEditOverrides] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const openModelEditor = async (m: any) => {
     setEditingModel(m);
@@ -127,6 +129,47 @@ export default function Providers() {
   const isModelDisabled = (provider: string, modelId: string, serverDisabled: boolean) => {
     const key = `${provider}::${modelId}`;
     return key in modelOverrides ? modelOverrides[key] : serverDisabled;
+  };
+
+  const toggleSort = (col: string) => {
+    if (sortCol === col) {
+      setSortDir(d => d === "asc" ? "desc" : "asc");
+    } else {
+      setSortCol(col);
+      setSortDir("asc");
+    }
+  };
+
+  const sortIndicator = (col: string) =>
+    sortCol === col ? (sortDir === "asc" ? " \u25B2" : " \u25BC") : "";
+
+  const sortModels = (arr: any[]) => {
+    if (!sortCol) return arr;
+    const sorted = [...arr];
+    const dir = sortDir === "asc" ? 1 : -1;
+    sorted.sort((a, b) => {
+      let va: any, vb: any;
+      switch (sortCol) {
+        case "model": va = a.id ?? ""; vb = b.id ?? ""; break;
+        case "family": va = a.canonical_family ?? ""; vb = b.canonical_family ?? ""; break;
+        case "tier": {
+          const order: Record<string, number> = { reasoning: 0, complex: 1, medium: 2, simple: 3 };
+          va = order[(a.quality_tier ?? "").toLowerCase()] ?? 9;
+          vb = order[(b.quality_tier ?? "").toLowerCase()] ?? 9;
+          return (va - vb) * dir;
+        }
+        case "input": va = a.pricing?.input_per_m ?? 0; vb = b.pricing?.input_per_m ?? 0; return (va - vb) * dir;
+        case "output": va = a.pricing?.output_per_m ?? 0; vb = b.pricing?.output_per_m ?? 0; return (va - vb) * dir;
+        case "marginal": {
+          const ma = a.marginal_cost?.is_free ? 0 : (a.marginal_cost?.usd ?? 999);
+          const mb = b.marginal_cost?.is_free ? 0 : (b.marginal_cost?.usd ?? 999);
+          return (ma - mb) * dir;
+        }
+        default: return 0;
+      }
+      return va < vb ? -dir : va > vb ? dir : 0;
+    });
+    return sorted;
   };
 
   const filteredModels = useMemo(() => {
@@ -250,19 +293,19 @@ export default function Providers() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-themed text-left text-xs text-secondary">
-                  <th className="px-4 py-2">Model</th>
-                  <th className="px-4 py-2">Family</th>
-                  <th className="px-4 py-2">Tier</th>
-                  <th className="px-4 py-2 text-right">Input $/M</th>
-                  <th className="px-4 py-2 text-right">Output $/M</th>
-                  <th className="px-4 py-2 text-right">Marginal</th>
+                  <th className="px-4 py-2 cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("model")}>Model{sortIndicator("model")}</th>
+                  <th className="px-4 py-2 cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("family")}>Family{sortIndicator("family")}</th>
+                  <th className="px-4 py-2 cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("tier")}>Tier{sortIndicator("tier")}</th>
+                  <th className="px-4 py-2 text-right cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("input")}>Input $/M{sortIndicator("input")}</th>
+                  <th className="px-4 py-2 text-right cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("output")}>Output $/M{sortIndicator("output")}</th>
+                  <th className="px-4 py-2 text-right cursor-pointer select-none hover:text-primary" onClick={() => toggleSort("marginal")}>Marginal{sortIndicator("marginal")}</th>
                   <th className="px-4 py-2">Features</th>
                   <th className="px-4 py-2">Status</th>
                   <th className="px-4 py-2"></th>
                 </tr>
               </thead>
               <tbody>
-                {providerModels.map((m: any) => {
+                {sortModels(providerModels).map((m: any) => {
                   const pDisabled = isProviderDisabled(provider, providers.find((p: any) => p.name === provider)?.is_disabled ?? false);
                   const disabled = isModelDisabled(provider, m.id, !!m.is_disabled);
                   const cbRaw = m.circuit_breaker ?? "Unknown";
