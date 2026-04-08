@@ -1,6 +1,7 @@
 pub mod canonical_driver;
 pub mod grpc;
 pub mod harness;
+pub mod sse_forwarder;
 pub mod rules;
 pub mod token_vault;
 
@@ -1726,13 +1727,14 @@ async fn chat_completions(
                         Ok::<_, std::io::Error>(bytes::Bytes::from(routing_meta))
                     });
 
-                    let body_stream = byte_stream.map(|result| {
-                        result
-                            .map(|bytes| bytes)
-                            .map_err(|e| {
-                                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                            })
-                    });
+                    // Drive provider output through the canonical SSE forwarder,
+                    // which parses each SSE event, hands the JSON body to a
+                    // stateful CanonicalDriver, and injects an `x_coalesce`
+                    // canonical delta next to the original payload.
+                    let body_stream = crate::sse_forwarder::transform_stream(
+                        byte_stream,
+                        &selected_model.provider,
+                    );
 
                     let combined = meta_stream.chain(body_stream);
 
