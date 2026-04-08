@@ -10,6 +10,8 @@ export interface RoutingPath {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  finishReason?: string;
   error?: boolean;
   candidates?: Array<{
     provider: string;

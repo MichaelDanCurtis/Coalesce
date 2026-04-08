@@ -42,6 +42,7 @@ interface ModelOption {
   provider: string;
   qualityTier: string;
   vision: boolean;
+  contextWindow?: number;
 }
 
 // ─── Constants ───────────────────────────────────────────────
@@ -155,6 +156,18 @@ const mdComponents = {
       </blockquote>
     );
   },
+  img({ src, alt }: any) {
+    // Phase 19.5: render generated images inline. Capped to a
+    // reasonable max so they don't overflow the chat column.
+    return (
+      <img
+        src={src}
+        alt={alt || ""}
+        className="my-2 rounded-md border border-themed max-w-full max-h-96 object-contain"
+        loading="lazy"
+      />
+    );
+  },
 };
 
 // ─── Main Component ──────────────────────────────────────────
@@ -200,6 +213,23 @@ export default function Chat() {
     return Array.from(provSet).sort();
   }, [models]);
 
+  // ─── 19.5 Context window fill ─────────────────────────────
+  // Uses the last assistant turn's reported inputTokens as a proxy for
+  // current context usage. Falls back to a summed estimate if no routing
+  // data is attached yet.
+  const contextFill = useMemo(() => {
+    if (!active) return null;
+    const lastWithTokens = [...active.messages]
+      .reverse()
+      .find((m) => m.routing?.inputTokens || m.routing?.outputTokens);
+    const used =
+      (lastWithTokens?.routing?.inputTokens || 0) +
+      (lastWithTokens?.routing?.outputTokens || 0);
+    const modelOpt = models.find((m) => m.id === (active.model || selectedModel));
+    const max = modelOpt?.contextWindow ?? 128000;
+    return { used, max };
+  }, [active, models, selectedModel]);
+
   const filteredModels = useMemo(() => {
     if (selectedProvider === "any") return models;
     return models.filter((m) => m.provider === selectedProvider);
@@ -227,6 +257,7 @@ export default function Chat() {
           provider: m.owned_by,
           qualityTier: m.quality_tier,
           vision: m.vision || false,
+          contextWindow: m.context_window ?? m.context_length ?? undefined,
         }));
         // Sort: free first, then by provider, then by name
         opts.sort((a, b) => a.id.localeCompare(b.id));
@@ -583,6 +614,8 @@ export default function Chat() {
         let buffer = "";
         let inputTokens = 0;
         let outputTokens = 0;
+        let cacheReadTokens = 0;
+        let finishReason: string | undefined;
         let costUsd = 0;
         let routingScore = 0;
 
@@ -616,6 +649,14 @@ export default function Chat() {
               if (chunk.usage) {
                 inputTokens = chunk.usage.prompt_tokens || 0;
                 outputTokens = chunk.usage.completion_tokens || 0;
+                // Anthropic (proxied) surfaces cache hits here.
+                cacheReadTokens =
+                  chunk.usage.cache_read_input_tokens ||
+                  chunk.usage.prompt_tokens_details?.cached_tokens ||
+                  0;
+              }
+              if (chunk.choices?.[0]?.finish_reason) {
+                finishReason = chunk.choices[0].finish_reason;
               }
 
               const delta = chunk.choices?.[0]?.delta;
@@ -651,6 +692,8 @@ export default function Chat() {
           latencyMs,
           inputTokens,
           outputTokens,
+          cacheReadTokens,
+          finishReason,
         };
 
         // Final update with routing data
@@ -885,7 +928,19 @@ export default function Chat() {
         <span className="chat-terminal__dot chat-terminal__dot--red" />
         <span className="chat-terminal__dot chat-terminal__dot--yellow" />
         <span className="chat-terminal__dot chat-terminal__dot--green" />
-        <span className="chat-terminal__title">coalesce — chat</span>
+        <span className="chat-terminal__title">
+          coalesce — {active?.model || selectedModel || "chat"}
+          {contextFill ? (
+            <>
+              {" · "}
+              <span title={`${contextFill.used} / ${contextFill.max} tokens`}>
+                {formatTokens(contextFill.used)}/{formatTokens(contextFill.max)}
+                {" "}
+                ({Math.min(100, Math.round((contextFill.used / contextFill.max) * 100))}%)
+              </span>
+            </>
+          ) : null}
+        </span>
       </div>
       <div className="flex flex-1 overflow-hidden">
       {/* ─── Left: Conversation History ──────────────── */}
@@ -1195,6 +1250,15 @@ export default function Chat() {
                     </button>
                   )}
 
+                  {msg.routing && (msg.routing.cacheReadTokens ?? 0) > 0 && (
+                    <span
+                      className="text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/40 text-emerald-400"
+                      title={`${msg.routing.cacheReadTokens} prompt tokens served from cache`}
+                    >
+                      cached ✓
+                    </span>
+                  )}
+
                   <div className="flex-1" />
 
                   {/* Actions */}
@@ -1248,6 +1312,32 @@ export default function Chat() {
                           title="Regenerate"
                         >
                           Retry
+                        </button>
+                        {msg.routing?.finishReason === "length" && (
+                          <button
+                            onClick={() => sendMessage("continue")}
+                            className="text-[10px] text-amber-400 hover:text-amber-300 transition-colors"
+                            title="Response was truncated — continue generating"
+                          >
+                            Continue ⏵
+                          </button>
+                        )}
+                        <button
+                          onClick={async () => {
+                            try {
+                              const blob = await api.synthesizeSpeech(msg.content);
+                              const url = URL.createObjectURL(blob);
+                              const audio = new Audio(url);
+                              audio.onended = () => URL.revokeObjectURL(url);
+                              await audio.play();
+                            } catch (err) {
+                              console.error("tts failed", err);
+                            }
+                          }}
+                          className="text-[10px] text-secondary hover:text-primary transition-colors"
+                          title="Play with TTS"
+                        >
+                          ♪
                         </button>
                         {msg.routing && (
                           <>

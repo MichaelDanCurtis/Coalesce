@@ -390,6 +390,20 @@ export const api = {
   },
 
   // --- Audio ---
+  /// POST text to /v1/audio/speech and return an audio Blob.
+  async synthesizeSpeech(text: string, voice = "alloy"): Promise<Blob> {
+    const res = await fetch(`${PROXY_BASE}/v1/audio/speech`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "tts-1", voice, input: text }),
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText);
+      throw new Error(`tts failed: ${res.status} ${msg}`);
+    }
+    return await res.blob();
+  },
+
   /// POST an audio blob to /v1/audio/transcriptions and return the text.
   /// Uses multipart/form-data per the OpenAI-compatible endpoint.
   async transcribeAudio(blob: Blob, filename = "recording.webm"): Promise<string> {

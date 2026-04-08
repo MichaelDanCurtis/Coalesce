@@ -134,9 +134,49 @@ interface BlockRendererProps {
 }
 
 export function BlockRenderer({ blocks, mdComponents, streaming, onChoose }: BlockRendererProps) {
+  // Mark each index with a "tool run" id so consecutive tool_call
+  // blocks can be rendered side-by-side as a parallel-tool grid.
+  const runIds: Array<number | null> = new Array(blocks.length).fill(null);
+  const runs: Array<Array<number>> = [];
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].kind !== "tool_call") continue;
+    if (i > 0 && blocks[i - 1].kind === "tool_call") {
+      const id = runIds[i - 1]!;
+      runIds[i] = id;
+      runs[id].push(i);
+    } else {
+      const id = runs.length;
+      runs.push([i]);
+      runIds[i] = id;
+    }
+  }
+  // Only first index of a multi-block run renders; others skip.
+  const skipIdx = new Set<number>();
+  for (const run of runs) {
+    if (run.length > 1) for (let k = 1; k < run.length; k++) skipIdx.add(run[k]);
+  }
+
   return (
     <div className="space-y-1">
       {blocks.map((b, i) => {
+        if (skipIdx.has(i)) return null;
+        if (b.kind === "tool_call" && runIds[i] !== null) {
+          const run = runs[runIds[i]!];
+          if (run.length > 1) {
+            return (
+              <div key={i} className="flex flex-wrap gap-2">
+                {run.map((idx) => {
+                  const tb = blocks[idx] as Extract<Block, { kind: "tool_call" }>;
+                  return (
+                    <div key={idx} className="flex-1 min-w-[240px]">
+                      <ToolCallBlock name={tb.name} args={tb.args} />
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          }
+        }
         switch (b.kind) {
           case "text":
             return (
