@@ -1,3 +1,4 @@
+pub mod canonical_driver;
 pub mod grpc;
 pub mod harness;
 pub mod rules;
