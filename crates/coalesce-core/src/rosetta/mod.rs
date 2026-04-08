@@ -15,6 +15,9 @@ pub mod equivalence;
 pub mod capabilities;
 pub mod adapter;
 pub mod context;
+pub mod response;
+pub mod stream_adapter;
+pub mod adapters;
 
 pub use types::*;
 pub use thinking::{CanonicalThinking, ThinkingBlock, ThinkingSplitParser};
@@ -22,3 +25,6 @@ pub use equivalence::{ToolEquivalenceClass, EquivalenceMember, EquivalenceRegist
 pub use capabilities::{ProviderToolCapabilities, ThinkingToolsSupport, ProviderQuirk, StreamingToolBehavior};
 pub use adapter::ProviderToolAdapter;
 pub use context::{RosettaContext, ToolScoring};
+pub use response::{CanonicalBlock, CanonicalStreamDelta, CanonicalUsage, FinishReason};
+pub use stream_adapter::{ProviderStreamAdapter, ParseError};
+pub use adapters::{OpenAiCompatAdapter, AnthropicAdapter, GoogleAdapter};
