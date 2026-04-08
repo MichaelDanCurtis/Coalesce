@@ -9,6 +9,23 @@ Smart LLM routing proxy that scores requests across 15 dimensions and routes the
 
 ---
 
+## Chat
+
+A terminal-styled native chat tab built on the proxy's canonical Rosetta shape — feels like a terminal, speaks every modern provider feature fluently.
+
+![](docs/chat.png)
+
+- **Structured rendering** — thinking blocks, tool calls, citations, and generated images each render as their own block type, not raw text
+- **Multi-choice detection** — numbered/bulleted trailing lists turn into clickable buttons; optional `respond_with_choices` plugin gives models a formal tool for structured questions
+- **Slash commands** — `/model`, `/system`, `/clear`, `/branch`, `/regen` with a `?` cheatsheet
+- **Branching & replay** — fork a conversation at any turn, re-run a user message against a different model, send timeline entries straight back into Chat
+- **A/B compare** — toggle in the header, pick two models, send once, see both responses side-by-side
+- **Live provider features** — cache-hit badge, context-window meter, parallel tool call grid, Continue button on truncated responses
+- **Voice I/O** — mic button transcribes via Whisper, ♪ button plays assistant turns through `/v1/audio/speech`
+- **Theming** — Settings → Chat Terminal Theme lets you pick font, color scheme (green / amber / white / coalesce-brand), and toggle scanlines
+
+---
+
 ## Features
 
 - **15-dimension request scoring** -- classifies prompts into Simple, Medium, Complex, or Reasoning tiers

@@ -4,7 +4,12 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import RoutingViz, { RoutingPath } from "./RoutingViz";
 import { api } from "../api/client";
 import { parseBlocks, BlockRenderer } from "./chat/blocks";
-import { parseSlash } from "./chat/slashCommands";
+import { parseSlash, SLASH_COMMANDS } from "./chat/slashCommands";
+import {
+  loadTerminalTheme,
+  terminalThemeStyle,
+  TerminalTheme,
+} from "./chat/terminalTheme";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -60,6 +65,34 @@ interface ModelOption {
 
 const API_BASE = "http://127.0.0.1:8402";
 const STORAGE_KEY = "coalesce_conversations";
+
+// Phase 19.7 empty-state examples, one per showcased feature.
+const EXAMPLE_PROMPTS: Array<{ tag: string; prompt: string }> = [
+  {
+    tag: "multi-choice",
+    prompt: "I want to build a web scraper. What language should I use?",
+  },
+  {
+    tag: "thinking",
+    prompt: "Explain step by step why the sky appears blue at noon but red at sunset.",
+  },
+  {
+    tag: "tool use",
+    prompt: "What's the weather in Tokyo and what time is sunset there today?",
+  },
+  {
+    tag: "vision",
+    prompt: "Paste or drag an image and ask: what's in this picture?",
+  },
+  {
+    tag: "code",
+    prompt: "Write a Rust function that debounces an async callback by N ms.",
+  },
+  {
+    tag: "A/B compare",
+    prompt: "Toggle A/B above, pick two models, then ask: which of you is funnier?",
+  },
+];
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -205,6 +238,36 @@ export default function Chat() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── 19.7 Theme + cheatsheet ─────────────────────────────
+  const [termTheme, setTermTheme] = useState<TerminalTheme>(() => loadTerminalTheme());
+  const [showCheatsheet, setShowCheatsheet] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<TerminalTheme>).detail;
+      if (detail) setTermTheme(detail);
+    };
+    window.addEventListener("coalesce:terminal-theme", handler);
+    return () => window.removeEventListener("coalesce:terminal-theme", handler);
+  }, []);
+
+  // Global `?` shortcut to toggle the cheatsheet (ignored while typing).
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "?" || e.shiftKey === false) {
+        if (e.key !== "?") return;
+      }
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        return;
+      }
+      e.preventDefault();
+      setShowCheatsheet((v) => !v);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // ─── 19.6 A/B compare mode ────────────────────────────────
   const [abMode, setAbMode] = useState(false);
@@ -1037,7 +1100,8 @@ export default function Chat() {
 
   return (
     <div
-      className="chat-terminal chat-terminal--scanlines flex h-full overflow-hidden flex-col"
+      className={`chat-terminal ${termTheme.scanlines ? "chat-terminal--scanlines" : ""} flex h-full overflow-hidden flex-col`}
+      style={terminalThemeStyle(termTheme)}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
     >
@@ -1045,6 +1109,13 @@ export default function Chat() {
         <span className="chat-terminal__dot chat-terminal__dot--red" />
         <span className="chat-terminal__dot chat-terminal__dot--yellow" />
         <span className="chat-terminal__dot chat-terminal__dot--green" />
+        <button
+          onClick={() => setShowCheatsheet(true)}
+          className="text-[11px] opacity-60 hover:opacity-100 ml-2"
+          title="Keyboard shortcuts (?)"
+        >
+          ?
+        </button>
         <span className="chat-terminal__title">
           coalesce — {active?.model || selectedModel || "chat"}
           {contextFill ? (
@@ -1291,6 +1362,31 @@ export default function Chat() {
               >
                 New Chat
               </button>
+            </div>
+          )}
+
+          {active && active.messages.length === 0 && !abViewIds && (
+            <div className="max-w-2xl mx-auto py-8">
+              <div className="text-xs uppercase tracking-wider opacity-60 mb-3">
+                try an example
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {EXAMPLE_PROMPTS.map((ex, i) => (
+                  <button
+                    key={i}
+                    onClick={() => setInput(ex.prompt)}
+                    className="text-left p-3 border border-themed rounded-lg hover:border-brand-500/60 transition-colors"
+                  >
+                    <div className="text-[10px] uppercase tracking-wider opacity-60 mb-1">
+                      {ex.tag}
+                    </div>
+                    <div className="text-sm">{ex.prompt}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="text-[10px] opacity-40 mt-4 text-center">
+                press ? for keyboard shortcuts · type / for slash commands
+              </div>
             </div>
           )}
 
@@ -1718,6 +1814,59 @@ export default function Chat() {
         <RoutingViz path={selectedRouting} />
       </div>
       </div>
+
+      {showCheatsheet && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+          onClick={() => setShowCheatsheet(false)}
+        >
+          <div
+            className="max-w-lg w-full mx-4 p-5 rounded-lg border border-themed bg-surface text-primary"
+            style={terminalThemeStyle(termTheme)}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold">Keyboard & Slash Commands</h3>
+              <button
+                onClick={() => setShowCheatsheet(false)}
+                className="text-secondary hover:text-primary"
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-3 text-xs">
+              <div>
+                <div className="opacity-60 uppercase tracking-wider mb-1">keyboard</div>
+                <ul className="space-y-1">
+                  <li><kbd className="px-1 border border-themed rounded">Enter</kbd> — send message</li>
+                  <li><kbd className="px-1 border border-themed rounded">Shift</kbd>+<kbd className="px-1 border border-themed rounded">Enter</kbd> — newline</li>
+                  <li><kbd className="px-1 border border-themed rounded">?</kbd> — toggle this cheatsheet</li>
+                </ul>
+              </div>
+              <div>
+                <div className="opacity-60 uppercase tracking-wider mb-1">slash commands</div>
+                <ul className="space-y-1">
+                  {SLASH_COMMANDS.map((c) => (
+                    <li key={c.name}>
+                      <code className="text-amber-400">{c.name}</code>
+                      <span className="opacity-70"> — {c.desc}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <div className="opacity-60 uppercase tracking-wider mb-1">features</div>
+                <ul className="space-y-1 opacity-80">
+                  <li>⑂ Fork — branch conversation at any turn</li>
+                  <li>A/B — compare two models side by side</li>
+                  <li>🎤 — voice input via Whisper</li>
+                  <li>♪ — TTS playback of assistant turns</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

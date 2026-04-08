@@ -2,6 +2,13 @@ import { useState, useEffect, useCallback } from "react";
 import type { ThemeMode, ThemeName } from "../hooks/useTheme";
 import { useTranslation, type Locale } from "../i18n";
 import { api } from "../api/client";
+import {
+  loadTerminalTheme,
+  saveTerminalTheme,
+  TERMINAL_FONTS,
+  TERMINAL_SCHEMES,
+  TerminalTheme,
+} from "./chat/terminalTheme";
 
 interface ThemeHook {
   mode: ThemeMode;
@@ -156,6 +163,8 @@ export default function Settings({ theme }: { theme: ThemeHook }) {
           <UpdateChecker />
         </div>
       </div>
+
+      <ChatThemePanel />
 
       <div className="card">
         <h3 className="text-sm font-medium mb-4">{t("settings.about")}</h3>
@@ -914,6 +923,70 @@ function UpdateChecker() {
       >
         {checking ? "Checking..." : "Check Now"}
       </button>
+    </div>
+  );
+}
+
+// ─── 19.7 Chat terminal theme panel ─────────────────────────
+
+function ChatThemePanel() {
+  const [theme, setTheme] = useState<TerminalTheme>(() => loadTerminalTheme());
+
+  const update = (patch: Partial<TerminalTheme>) => {
+    const next = { ...theme, ...patch };
+    setTheme(next);
+    saveTerminalTheme(next);
+  };
+
+  return (
+    <div className="card">
+      <h3 className="text-sm font-medium mb-4">Chat Terminal Theme</h3>
+      <div className="space-y-4">
+        <div>
+          <label className="text-xs text-secondary block mb-1">Font family</label>
+          <select
+            value={theme.font}
+            onChange={(e) => update({ font: e.target.value as TerminalTheme["font"] })}
+            className="input-field max-w-xs"
+          >
+            {TERMINAL_FONTS.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="text-xs text-secondary block mb-1">Color scheme</label>
+          <div className="flex flex-wrap gap-2">
+            {TERMINAL_SCHEMES.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => update({ scheme: s.id })}
+                className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
+                  theme.scheme === s.id
+                    ? "border-brand-500 bg-brand-600/10 text-brand-300"
+                    : "border-themed text-secondary hover:text-primary"
+                }`}
+              >
+                {s.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            checked={theme.scanlines}
+            onChange={(e) => update({ scanlines: e.target.checked })}
+          />
+          Scanline overlay
+        </label>
+
+        <p className="text-xs text-secondary">
+          Affects the Chat tab only. Changes apply immediately.
+        </p>
+      </div>
     </div>
   );
 }
