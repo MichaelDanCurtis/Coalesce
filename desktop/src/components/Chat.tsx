@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import RoutingViz, { RoutingPath } from "./RoutingViz";
 import { api } from "../api/client";
+import { parseBlocks, BlockRenderer } from "./chat/blocks";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -753,10 +752,17 @@ export default function Chat() {
 
   return (
     <div
-      className="flex h-full overflow-hidden"
+      className="chat-terminal chat-terminal--scanlines flex h-full overflow-hidden flex-col"
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
     >
+      <div className="chat-terminal__chrome">
+        <span className="chat-terminal__dot chat-terminal__dot--red" />
+        <span className="chat-terminal__dot chat-terminal__dot--yellow" />
+        <span className="chat-terminal__dot chat-terminal__dot--green" />
+        <span className="chat-terminal__title">coalesce — chat</span>
+      </div>
+      <div className="flex flex-1 overflow-hidden">
       {/* ─── Left: Conversation History ──────────────── */}
       <div
         className="flex flex-col border-r border-themed bg-surface"
@@ -1019,14 +1025,11 @@ export default function Chat() {
                     </div>
                   </div>
                 ) : (
-                  <div className="prose prose-sm prose-invert max-w-none text-sm leading-relaxed">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={mdComponents}
-                    >
-                      {msg.content || (streaming ? "▍" : "")}
-                    </ReactMarkdown>
-                  </div>
+                  <BlockRenderer
+                    blocks={parseBlocks(msg.content || (streaming ? "▍" : ""))}
+                    mdComponents={mdComponents}
+                    streaming={streaming}
+                  />
                 )}
 
                 {/* Message footer: routing badge + actions */}
@@ -1229,6 +1232,7 @@ export default function Chat() {
         style={{ width: vizWidth, minWidth: vizWidth }}
       >
         <RoutingViz path={selectedRouting} />
+      </div>
       </div>
     </div>
   );
