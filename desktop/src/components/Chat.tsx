@@ -4,6 +4,7 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import RoutingViz, { RoutingPath } from "./RoutingViz";
 import { api } from "../api/client";
 import { parseBlocks, BlockRenderer } from "./chat/blocks";
+import { parseSlash } from "./chat/slashCommands";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -180,6 +181,13 @@ export default function Chat() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── 19.4 rich input state ────────────────────────────────
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaChunksRef = useRef<Blob[]>([]);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // Derived
   const active = useMemo(
@@ -736,16 +744,133 @@ export default function Chat() {
     [active, updateConversation, sendMessage]
   );
 
+  // ─── 19.4 Slash command dispatcher ──────────────────────
+
+  const handleSend = useCallback(() => {
+    const raw = input;
+    if (!raw.trim()) {
+      sendMessage();
+      return;
+    }
+    const action = parseSlash(raw);
+    switch (action.kind) {
+      case "none":
+        sendMessage();
+        return;
+      case "model": {
+        if (!active) {
+          setSelectedModel(action.model);
+        } else {
+          updateConversation(active.id, (c) => ({ ...c, model: action.model }));
+        }
+        setInput("");
+        return;
+      }
+      case "system": {
+        if (active) {
+          updateConversation(active.id, (c) => ({ ...c, systemPrompt: action.prompt }));
+        }
+        setInput("");
+        return;
+      }
+      case "clear": {
+        if (active) {
+          updateConversation(active.id, (c) => ({ ...c, messages: [] }));
+        }
+        setInput("");
+        return;
+      }
+      case "branch": {
+        if (active) {
+          const fork: Conversation = {
+            ...active,
+            id: generateId(),
+            title: active.title + " (fork)",
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messages: active.messages.map((m) => ({ ...m })),
+          };
+          setConversations((prev) => [fork, ...prev]);
+          setActiveId(fork.id);
+        }
+        setInput("");
+        return;
+      }
+      case "regen": {
+        if (active) {
+          const lastAssistant = [...active.messages].reverse().find((m) => m.role === "assistant");
+          if (lastAssistant) regenerate(lastAssistant.id);
+        }
+        setInput("");
+        return;
+      }
+      case "unknown": {
+        // Surface as a harmless inline notice in the input.
+        setInput(`# unknown command: ${action.name}\n` + raw);
+        return;
+      }
+    }
+  }, [input, active, regenerate, sendMessage, updateConversation]);
+
+  // ─── 19.4 Mic / audio transcription ─────────────────────
+
+  const stopRecording = useCallback(() => {
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== "inactive") rec.stop();
+    const stream = mediaStreamRef.current;
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+    setRecording(false);
+  }, []);
+
+  const toggleMic = useCallback(async () => {
+    if (recording) {
+      stopRecording();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      const rec = new MediaRecorder(stream);
+      mediaChunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) mediaChunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        const blob = new Blob(mediaChunksRef.current, { type: "audio/webm" });
+        mediaChunksRef.current = [];
+        if (blob.size === 0) return;
+        setTranscribing(true);
+        try {
+          const text = await api.transcribeAudio(blob);
+          if (text) {
+            setInput((prev) => (prev ? prev + " " + text : text));
+          }
+        } catch (err) {
+          console.error("transcription failed", err);
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mediaRecorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+    } catch (err) {
+      console.error("mic access denied", err);
+      setRecording(false);
+    }
+  }, [recording, stopRecording]);
+
   // ─── Key handler ─────────────────────────────────────────
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        sendMessage();
+        handleSend();
       }
     },
-    [sendMessage]
+    [handleSend]
   );
 
   // ─── Render ──────────────────────────────────────────────
@@ -1074,13 +1199,35 @@ export default function Chat() {
 
                   {/* Actions */}
                   {msg.role === "user" && !streaming && (
-                    <button
-                      onClick={() => startEdit(msg)}
-                      className="text-[10px] text-secondary hover:text-primary transition-colors"
-                      title="Edit & resend"
-                    >
-                      Edit
-                    </button>
+                    <>
+                      <button
+                        onClick={() => startEdit(msg)}
+                        className="text-[10px] text-secondary hover:text-primary transition-colors"
+                        title="Edit & resend"
+                      >
+                        Edit
+                      </button>
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const m = e.target.value;
+                          if (!m) return;
+                          setSelectedModel(m);
+                          const content = msg.content;
+                          setTimeout(() => sendMessage(content), 0);
+                          e.currentTarget.value = "";
+                        }}
+                        className="text-[10px] bg-transparent text-secondary hover:text-primary border border-themed rounded px-1 py-0.5"
+                        title="Re-send with a different model"
+                      >
+                        <option value="">⟳ model…</option>
+                        {filteredModels.slice(0, 40).map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.provider}/{m.id}
+                          </option>
+                        ))}
+                      </select>
+                    </>
                   )}
                   {msg.role === "assistant" &&
                     msg.content &&
@@ -1152,7 +1299,12 @@ export default function Chat() {
                 className={`flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-themed ${att.error ? "bg-red-500/10 border-red-500/30" : "bg-surface-alt"}`}
               >
                 {att.type.startsWith("image/") ? (
-                  <img src={att.dataUrl} alt={att.name} className="w-8 h-8 rounded object-cover" />
+                  <img
+                    src={att.dataUrl}
+                    alt={att.name}
+                    className="w-16 h-16 rounded object-cover border border-themed"
+                    title={att.name}
+                  />
                 ) : att.parsing ? (
                   <span className="animate-spin">⏳</span>
                 ) : att.error ? (
@@ -1192,6 +1344,25 @@ export default function Chat() {
               📎
             </button>
 
+            <button
+              onClick={toggleMic}
+              disabled={transcribing}
+              className={`px-2 py-2 text-sm rounded-md border border-themed transition-colors ${
+                recording
+                  ? "bg-red-600/80 text-white animate-pulse"
+                  : "bg-surface-alt text-secondary hover:text-primary"
+              } disabled:opacity-40`}
+              title={
+                recording
+                  ? "Stop recording"
+                  : transcribing
+                  ? "Transcribing…"
+                  : "Record voice message"
+              }
+            >
+              {transcribing ? "⏳" : recording ? "⏹" : "🎤"}
+            </button>
+
             <textarea
               ref={inputRef}
               value={input}
@@ -1220,7 +1391,7 @@ export default function Chat() {
               </button>
             ) : (
               <button
-                onClick={() => sendMessage()}
+                onClick={handleSend}
                 disabled={(!input.trim() && attachments.length === 0) || attachments.some(a => a.parsing)}
                 className="px-4 py-2 text-sm rounded-lg btn-primary disabled:opacity-40 disabled:cursor-not-allowed"
               >

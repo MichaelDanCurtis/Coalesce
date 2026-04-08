@@ -389,6 +389,25 @@ export const api = {
     return `${PROXY_BASE}/api/v1/stats/export/costs/csv?days=${days ?? 30}`;
   },
 
+  // --- Audio ---
+  /// POST an audio blob to /v1/audio/transcriptions and return the text.
+  /// Uses multipart/form-data per the OpenAI-compatible endpoint.
+  async transcribeAudio(blob: Blob, filename = "recording.webm"): Promise<string> {
+    const form = new FormData();
+    form.append("file", blob, filename);
+    form.append("model", "whisper-1");
+    const res = await fetch(`${PROXY_BASE}/v1/audio/transcriptions`, {
+      method: "POST",
+      body: form,
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => res.statusText);
+      throw new Error(`transcription failed: ${res.status} ${msg}`);
+    }
+    const data = (await res.json()) as { text?: string };
+    return data.text ?? "";
+  },
+
   // --- Quality Feedback ---
   async submitFeedback(provider: string, model: string, rating: number) {
     return httpPost<{ status: string; current_score: number }>("/api/v1/feedback", { provider, model, rating });
