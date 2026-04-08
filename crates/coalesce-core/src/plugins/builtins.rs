@@ -183,6 +183,108 @@ impl Plugin for ContentFilterPlugin {
 }
 
 // ---------------------------------------------------------------------------
+// Respond With Choices
+// ---------------------------------------------------------------------------
+
+/// Injects a `respond_with_choices` tool definition into chat requests so
+/// models can formally return a question + list of options instead of
+/// prose. The Chat UI (Phase 19.3) detects a tool call to this name and
+/// renders polished choice buttons.
+///
+/// Off by default — callers must explicitly register this plugin. Intended
+/// to be gated behind a UI/config toggle in the desktop app.
+pub struct RespondWithChoicesPlugin {
+    manifest: PluginManifest,
+}
+
+impl RespondWithChoicesPlugin {
+    pub fn new() -> Self {
+        Self {
+            manifest: PluginManifest {
+                name: "respond_with_choices".into(),
+                version: "1.0.0".into(),
+                description:
+                    "Injects a respond_with_choices tool so models return structured options"
+                        .into(),
+                hooks: vec![PluginHook::OnRequest],
+            },
+        }
+    }
+
+    /// The canonical tool definition (OpenAI chat-completions shape).
+    fn tool_definition() -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "respond_with_choices",
+                "description": "Present the user with a question and a short list of clickable options instead of free-form prose. Use this whenever you would otherwise ask the user to pick between discrete alternatives.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "The question or prompt shown above the options."
+                        },
+                        "options": {
+                            "type": "array",
+                            "description": "2-6 short option labels the user can click.",
+                            "items": { "type": "string" },
+                            "minItems": 2,
+                            "maxItems": 6
+                        }
+                    },
+                    "required": ["question", "options"]
+                }
+            }
+        })
+    }
+}
+
+impl Default for RespondWithChoicesPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Plugin for RespondWithChoicesPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    fn on_request(&self, request: &serde_json::Value) -> PluginAction {
+        let mut req = request.clone();
+        let tool_def = Self::tool_definition();
+
+        // Append to existing tools array, or create one. Preserve any
+        // user-provided tools; don't clobber.
+        let obj = match req.as_object_mut() {
+            Some(o) => o,
+            None => return PluginAction::Continue(request.clone()),
+        };
+
+        match obj.get_mut("tools") {
+            Some(serde_json::Value::Array(arr)) => {
+                // Idempotent: don't double-inject.
+                let already = arr.iter().any(|t| {
+                    t.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        == Some("respond_with_choices")
+                });
+                if !already {
+                    arr.push(tool_def);
+                }
+            }
+            _ => {
+                obj.insert("tools".to_string(), serde_json::Value::Array(vec![tool_def]));
+            }
+        }
+
+        PluginAction::Continue(req)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -284,6 +386,65 @@ mod tests {
         let plugin = ContentFilterPlugin::new(vec!["secret".into()]);
         let req = chat_request("gpt-4", "Tell me the SECRET please");
         assert!(matches!(plugin.on_request(&req), PluginAction::Block(_)));
+    }
+
+    // -- RespondWithChoicesPlugin --
+
+    #[test]
+    fn test_respond_with_choices_injects_tool() {
+        let plugin = RespondWithChoicesPlugin::new();
+        let req = chat_request("gpt-4", "what next?");
+        match plugin.on_request(&req) {
+            PluginAction::Continue(v) => {
+                let tools = v.get("tools").and_then(|t| t.as_array()).expect("tools");
+                assert_eq!(tools.len(), 1);
+                assert_eq!(
+                    tools[0]["function"]["name"].as_str(),
+                    Some("respond_with_choices")
+                );
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_respond_with_choices_preserves_existing_tools() {
+        let plugin = RespondWithChoicesPlugin::new();
+        let mut req = chat_request("gpt-4", "hi");
+        req["tools"] = serde_json::json!([
+            {"type": "function", "function": {"name": "get_weather"}}
+        ]);
+        match plugin.on_request(&req) {
+            PluginAction::Continue(v) => {
+                let tools = v.get("tools").and_then(|t| t.as_array()).unwrap();
+                assert_eq!(tools.len(), 2);
+                let names: Vec<&str> = tools
+                    .iter()
+                    .filter_map(|t| t["function"]["name"].as_str())
+                    .collect();
+                assert!(names.contains(&"get_weather"));
+                assert!(names.contains(&"respond_with_choices"));
+            }
+            other => panic!("expected Continue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_respond_with_choices_idempotent() {
+        let plugin = RespondWithChoicesPlugin::new();
+        let req = chat_request("gpt-4", "hi");
+        let first = match plugin.on_request(&req) {
+            PluginAction::Continue(v) => v,
+            _ => panic!(),
+        };
+        let second = match plugin.on_request(&first) {
+            PluginAction::Continue(v) => v,
+            _ => panic!(),
+        };
+        assert_eq!(
+            second.get("tools").and_then(|t| t.as_array()).unwrap().len(),
+            1
+        );
     }
 
     // -- Integration with PluginHost --

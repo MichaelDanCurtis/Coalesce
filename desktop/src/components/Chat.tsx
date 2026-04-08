@@ -1029,6 +1029,11 @@ export default function Chat() {
                     blocks={parseBlocks(msg.content || (streaming ? "▍" : ""))}
                     mdComponents={mdComponents}
                     streaming={streaming}
+                    onChoose={
+                      msg.role === "assistant" && !streaming
+                        ? (choice) => sendMessage(choice)
+                        : undefined
+                    }
                   />
                 )}
 

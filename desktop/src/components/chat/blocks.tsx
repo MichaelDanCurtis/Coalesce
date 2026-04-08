@@ -1,6 +1,7 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { detectChoices, parseRespondWithChoicesArgs } from "./multichoice";
 
 // ─── Block types ─────────────────────────────────────────────
 // Targets the canonical Rosetta normalized response shape
@@ -15,7 +16,8 @@ export type Block =
   | { kind: "thinking"; text: string }
   | { kind: "tool_call"; id?: string; name: string; args: string; resultId?: string }
   | { kind: "tool_result"; callId?: string; text: string }
-  | { kind: "citation"; index: number; title?: string; url?: string; text?: string };
+  | { kind: "citation"; index: number; title?: string; url?: string; text?: string }
+  | { kind: "choices"; question: string; options: string[]; source: "heuristic" | "tool" };
 
 // ─── Parsing ─────────────────────────────────────────────────
 
@@ -80,7 +82,46 @@ export function parseBlocks(content: string): Block[] {
 
   // Fallback: nothing matched → single text block
   if (blocks.length === 0) blocks.push({ kind: "text", text: rest });
-  return blocks;
+
+  // ─── Post-processing passes ────────────────────────────────
+
+  // 1. Convert respond_with_choices tool calls into structured choices.
+  const withTool: Block[] = blocks.map((b) => {
+    if (b.kind === "tool_call" && b.name === "respond_with_choices") {
+      const parsed = parseRespondWithChoicesArgs(b.args);
+      if (parsed) {
+        return {
+          kind: "choices" as const,
+          question: parsed.question,
+          options: parsed.options,
+          source: "tool" as const,
+        };
+      }
+    }
+    return b;
+  });
+
+  // 2. Heuristic: if the final text block ends in a numbered/bulleted
+  // list, split it into a (possibly shorter) text block + choices block.
+  const finalIdx = withTool.length - 1;
+  const last = withTool[finalIdx];
+  if (last && last.kind === "text") {
+    const detected = detectChoices(last.text);
+    if (detected) {
+      const prefix = last.text.slice(0, detected.start);
+      const result: Block[] = withTool.slice(0, finalIdx);
+      if (prefix.trim()) result.push({ kind: "text", text: prefix });
+      result.push({
+        kind: "choices",
+        question: detected.question,
+        options: detected.options,
+        source: "heuristic",
+      });
+      return result;
+    }
+  }
+
+  return withTool;
 }
 
 // ─── Renderers ───────────────────────────────────────────────
@@ -89,9 +130,10 @@ interface BlockRendererProps {
   blocks: Block[];
   mdComponents: any;
   streaming?: boolean;
+  onChoose?: (choice: string) => void;
 }
 
-export function BlockRenderer({ blocks, mdComponents, streaming }: BlockRendererProps) {
+export function BlockRenderer({ blocks, mdComponents, streaming, onChoose }: BlockRendererProps) {
   return (
     <div className="space-y-1">
       {blocks.map((b, i) => {
@@ -118,6 +160,28 @@ export function BlockRenderer({ blocks, mdComponents, streaming }: BlockRenderer
                   tool_result
                 </div>
                 <pre className="text-xs whitespace-pre-wrap">{b.text}</pre>
+              </div>
+            );
+          case "choices":
+            return (
+              <div key={i} className="my-2">
+                {b.question ? (
+                  <div className="text-sm mb-1 opacity-90">{b.question}</div>
+                ) : null}
+                {b.options.map((opt, j) => (
+                  <button
+                    key={j}
+                    type="button"
+                    className="chat-terminal__choice"
+                    onClick={() => onChoose?.(opt)}
+                    disabled={!onChoose}
+                  >
+                    {opt}
+                  </button>
+                ))}
+                {b.source === "heuristic" ? (
+                  <div className="text-[10px] opacity-40 mt-1">detected</div>
+                ) : null}
               </div>
             );
           case "citation":
