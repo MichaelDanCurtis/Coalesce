@@ -203,6 +203,7 @@ export default function RequestTimeline() {
                 <th className="px-3 py-2 text-right">Cost</th>
                 <th className="px-3 py-2 text-right">Latency</th>
                 <th className="px-3 py-2">Status</th>
+                <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
@@ -249,6 +250,25 @@ export default function RequestTimeline() {
                     ) : (
                       <span className="badge-red">FAIL</span>
                     )}
+                  </td>
+                  <td className="px-3 py-2 text-right">
+                    <button
+                      className="text-xs text-secondary hover:text-primary"
+                      title="Open a new chat with this model"
+                      onClick={() => {
+                        const payload = { prompt: "", model: req.model };
+                        localStorage.setItem(
+                          "coalesce_chat_handoff",
+                          JSON.stringify(payload),
+                        );
+                        window.dispatchEvent(new CustomEvent("coalesce:chat-handoff"));
+                        window.dispatchEvent(
+                          new CustomEvent("coalesce:set-tab", { detail: { tab: "chat" } }),
+                        );
+                      }}
+                    >
+                      ↗ Chat
+                    </button>
                   </td>
                 </tr>
               ))}

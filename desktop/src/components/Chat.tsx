@@ -35,6 +35,17 @@ interface Conversation {
   systemPrompt: string;
   createdAt: number;
   updatedAt: number;
+  // 19.6 branching metadata
+  parentId?: string;
+  forkedFromMessageId?: string;
+}
+
+// ─── 19.6 Send-to-Chat handoff payload (localStorage) ───────
+const HANDOFF_KEY = "coalesce_chat_handoff";
+interface ChatHandoff {
+  prompt: string;
+  systemPrompt?: string;
+  model?: string;
 }
 
 interface ModelOption {
@@ -195,6 +206,11 @@ export default function Chat() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ─── 19.6 A/B compare mode ────────────────────────────────
+  const [abMode, setAbMode] = useState(false);
+  const [abModelB, setAbModelB] = useState<string>("auto");
+  const [abViewIds, setAbViewIds] = useState<[string, string] | null>(null);
+
   // ─── 19.4 rich input state ────────────────────────────────
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -271,6 +287,40 @@ export default function Chat() {
     saveConversations(conversations);
   }, [conversations]);
 
+  // ─── 19.6 Send-to-Chat handoff from Timeline ─────────────
+  // Timeline (or any other tab) can drop a payload in localStorage
+  // and dispatch `coalesce:chat-handoff`; we pick it up and seed a
+  // new conversation.
+  useEffect(() => {
+    const applyHandoff = () => {
+      try {
+        const raw = localStorage.getItem(HANDOFF_KEY);
+        if (!raw) return;
+        localStorage.removeItem(HANDOFF_KEY);
+        const payload = JSON.parse(raw) as ChatHandoff;
+        const conv = newConversation(payload.model || selectedModel);
+        if (payload.systemPrompt) conv.systemPrompt = payload.systemPrompt;
+        if (payload.prompt) {
+          conv.messages.push({
+            id: generateId(),
+            role: "user",
+            content: payload.prompt,
+            timestamp: Date.now(),
+          });
+          conv.title = payload.prompt.slice(0, 40) || conv.title;
+        }
+        setConversations((prev) => [conv, ...prev]);
+        setActiveId(conv.id);
+        if (payload.model) setSelectedModel(payload.model);
+      } catch {
+        /* ignore malformed payload */
+      }
+    };
+    applyHandoff();
+    window.addEventListener("coalesce:chat-handoff", applyHandoff);
+    return () => window.removeEventListener("coalesce:chat-handoff", applyHandoff);
+  }, [selectedModel]);
+
   // Scroll to bottom on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -317,6 +367,43 @@ export default function Chat() {
     setSelectedRouting(null);
     inputRef.current?.focus();
   }, [selectedModel]);
+
+  // ─── 19.6 Fork-from-here ───────────────────────────────
+  // Create a new conversation containing messages [0..forkMsgId] and
+  // switch to it. Tracks parentId/forkedFromMessageId so the sidebar
+  // can badge forked conversations. Used by the inline fork button,
+  // the /branch slash command, and the per-turn model override.
+  const forkFrom = useCallback(
+    (
+      sourceConv: Conversation,
+      forkMsgId: string | null,
+      opts?: { modelOverride?: string; switchTo?: boolean },
+    ): Conversation => {
+      const idx =
+        forkMsgId === null
+          ? sourceConv.messages.length - 1
+          : sourceConv.messages.findIndex((m) => m.id === forkMsgId);
+      const upto = idx >= 0 ? sourceConv.messages.slice(0, idx + 1) : [...sourceConv.messages];
+      const fork: Conversation = {
+        id: generateId(),
+        title: sourceConv.title + " (fork)",
+        messages: upto.map((m) => ({ ...m })),
+        model: opts?.modelOverride ?? sourceConv.model,
+        systemPrompt: sourceConv.systemPrompt,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        parentId: sourceConv.id,
+        forkedFromMessageId: forkMsgId ?? undefined,
+      };
+      setConversations((prev) => [fork, ...prev]);
+      if (opts?.switchTo !== false) {
+        setActiveId(fork.id);
+        if (opts?.modelOverride) setSelectedModel(opts.modelOverride);
+      }
+      return fork;
+    },
+    [],
+  );
 
   const deleteConversation = useCallback(
     (id: string) => {
@@ -787,12 +874,53 @@ export default function Chat() {
     [active, updateConversation, sendMessage]
   );
 
+  // ─── 19.6 A/B send ───────────────────────────────────────
+  // Forks the current conversation (or creates a new one) into two
+  // siblings, one per model, and sends the same prompt to both.
+  // Runtime-only — not persisted beyond the forks themselves.
+  const sendAB = useCallback(
+    async (content: string) => {
+      if (!content.trim()) return;
+      const source = active ?? newConversation(selectedModel);
+      if (!active) {
+        setConversations((prev) => [source, ...prev]);
+      }
+      const aFork = forkFrom(source, null, {
+        modelOverride: selectedModel,
+        switchTo: true,
+      });
+      updateConversation(aFork.id, (c) => ({ ...c, title: c.title + " [A]" }));
+      const bFork = forkFrom(source, null, {
+        modelOverride: abModelB,
+        switchTo: false,
+      });
+      updateConversation(bFork.id, (c) => ({ ...c, title: c.title + " [B]" }));
+      setAbViewIds([aFork.id, bFork.id]);
+      setTimeout(() => sendMessage(content), 0);
+      // TODO(19.6): truly parallel send to B. For now we queue the
+      // second send after a short delay so it runs against bFork
+      // once the first request's state settles.
+      setTimeout(() => {
+        setActiveId(bFork.id);
+        setSelectedModel(abModelB);
+        setTimeout(() => sendMessage(content), 0);
+      }, 100);
+    },
+    [active, selectedModel, abModelB, forkFrom, sendMessage, updateConversation],
+  );
+
   // ─── 19.4 Slash command dispatcher ──────────────────────
 
   const handleSend = useCallback(() => {
     const raw = input;
     if (!raw.trim()) {
       sendMessage();
+      return;
+    }
+    if (abMode) {
+      const content = raw;
+      setInput("");
+      sendAB(content);
       return;
     }
     const action = parseSlash(raw);
@@ -824,18 +952,7 @@ export default function Chat() {
         return;
       }
       case "branch": {
-        if (active) {
-          const fork: Conversation = {
-            ...active,
-            id: generateId(),
-            title: active.title + " (fork)",
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            messages: active.messages.map((m) => ({ ...m })),
-          };
-          setConversations((prev) => [fork, ...prev]);
-          setActiveId(fork.id);
-        }
+        if (active) forkFrom(active, null);
         setInput("");
         return;
       }
@@ -853,7 +970,7 @@ export default function Chat() {
         return;
       }
     }
-  }, [input, active, regenerate, sendMessage, updateConversation]);
+  }, [input, active, regenerate, sendMessage, updateConversation, forkFrom, abMode, sendAB]);
 
   // ─── 19.4 Mic / audio transcription ─────────────────────
 
@@ -988,6 +1105,9 @@ export default function Chat() {
                 setSelectedRouting(lastRouting || null);
               }}
             >
+              {conv.parentId && (
+                <span className="opacity-60" title="Forked conversation">⑂</span>
+              )}
               <span className="flex-1 truncate">{conv.title}</span>
               <button
                 className="opacity-0 group-hover:opacity-100 p-0.5 hover:text-red-400 transition-opacity"
@@ -1061,6 +1181,39 @@ export default function Chat() {
               </option>
             ))}
           </select>
+
+          <button
+            onClick={() => {
+              setAbMode((v) => !v);
+              if (abMode) {
+                setAbViewIds(null);
+              }
+            }}
+            className={`px-2 py-1.5 text-xs rounded-md border border-themed transition-colors ${
+              abMode
+                ? "bg-brand-600/20 text-brand-300"
+                : "bg-surface-alt text-secondary hover:text-primary"
+            }`}
+            title="Toggle A/B compare mode"
+          >
+            A/B
+          </button>
+
+          {abMode && (
+            <select
+              value={abModelB}
+              onChange={(e) => setAbModelB(e.target.value)}
+              className="max-w-[160px] px-2 py-1.5 text-xs rounded-md bg-surface-alt border border-themed text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+              title="Model B"
+            >
+              <option value="auto">B: auto</option>
+              {filteredModels.map((m) => (
+                <option key={`b:${m.provider}:${m.id}`} value={m.id}>
+                  B: {m.id}
+                </option>
+              ))}
+            </select>
+          )}
 
           <button
             onClick={() => {
@@ -1141,7 +1294,57 @@ export default function Chat() {
             </div>
           )}
 
-          {active?.messages.map((msg) => (
+          {abViewIds && (
+            <div className="flex gap-2 h-full overflow-hidden">
+              {abViewIds.map((cid, side) => {
+                const conv = conversations.find((c) => c.id === cid);
+                if (!conv) return null;
+                return (
+                  <div
+                    key={cid}
+                    className={`flex-1 min-w-0 border border-themed rounded-lg p-3 overflow-y-auto ${
+                      activeId === cid ? "border-brand-500/60" : ""
+                    }`}
+                  >
+                    <div className="text-[10px] uppercase tracking-wider opacity-60 mb-2 flex items-center gap-2">
+                      <span>{side === 0 ? "A" : "B"}</span>
+                      <span className="truncate">{conv.model}</span>
+                      <button
+                        className="ml-auto text-secondary hover:text-primary"
+                        onClick={() => setActiveId(cid)}
+                        title="Make active"
+                      >
+                        focus
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {conv.messages.map((m) => (
+                        <div
+                          key={m.id}
+                          className={`text-sm ${
+                            m.role === "user"
+                              ? "text-secondary"
+                              : "text-primary"
+                          }`}
+                        >
+                          <div className="text-[10px] opacity-50 mb-1">
+                            {m.role === "user" ? "user@coalesce:~$" : "assistant >"}
+                          </div>
+                          <BlockRenderer
+                            blocks={parseBlocks(m.content || "")}
+                            mdComponents={mdComponents}
+                            streaming={streaming && activeId === cid}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {!abViewIds && active?.messages.map((msg) => (
             <div
               key={msg.id}
               className={`group flex gap-3 ${
@@ -1275,14 +1478,20 @@ export default function Chat() {
                         value=""
                         onChange={(e) => {
                           const m = e.target.value;
-                          if (!m) return;
-                          setSelectedModel(m);
+                          if (!m || !active) return;
+                          // Fork at the message *before* this user turn
+                          // so the fork contains the prior context, then
+                          // re-send this content against the new model.
+                          const idx = active.messages.findIndex((x) => x.id === msg.id);
+                          const priorId =
+                            idx > 0 ? active.messages[idx - 1].id : null;
+                          forkFrom(active, priorId, { modelOverride: m });
                           const content = msg.content;
                           setTimeout(() => sendMessage(content), 0);
                           e.currentTarget.value = "";
                         }}
                         className="text-[10px] bg-transparent text-secondary hover:text-primary border border-themed rounded px-1 py-0.5"
-                        title="Re-send with a different model"
+                        title="Fork and re-send with a different model"
                       >
                         <option value="">⟳ model…</option>
                         {filteredModels.slice(0, 40).map((m) => (
@@ -1292,6 +1501,15 @@ export default function Chat() {
                         ))}
                       </select>
                     </>
+                  )}
+                  {!streaming && active && (
+                    <button
+                      onClick={() => forkFrom(active, msg.id)}
+                      className="text-[10px] text-secondary hover:text-primary transition-colors"
+                      title="Fork conversation from this turn"
+                    >
+                      ⑂ Fork
+                    </button>
                   )}
                   {msg.role === "assistant" &&
                     msg.content &&

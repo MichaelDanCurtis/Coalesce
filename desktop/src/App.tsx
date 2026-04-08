@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Layout, { type TabId } from "./components/Layout";
 import Overview from "./components/Overview";
 import Providers from "./components/Providers";
@@ -23,6 +23,17 @@ import { NotificationProvider } from "./components/Notifications";
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const theme = useTheme();
+
+  // Allow any component to request a tab switch (Phase 19.6
+  // Send-to-Chat). Listen on window to avoid plumbing props.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ tab: TabId }>).detail;
+      if (detail?.tab) setActiveTab(detail.tab);
+    };
+    window.addEventListener("coalesce:set-tab", handler);
+    return () => window.removeEventListener("coalesce:set-tab", handler);
+  }, []);
 
   const renderTab = () => {
     switch (activeTab) {
