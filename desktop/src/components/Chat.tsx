@@ -786,14 +786,14 @@ export default function Chat() {
               const chunk = JSON.parse(data);
 
               // Extract routing metadata from SSE metadata chunk
-              if (chunk.x_coalesce) {
-                routingScore = chunk.x_coalesce.score || routingScore;
-                costUsd = chunk.x_coalesce.cost_usd || costUsd;
+              if (chunk.x_coalesce_route) {
+                routingScore = chunk.x_coalesce_route.score || routingScore;
+                costUsd = chunk.x_coalesce_route.cost_usd || costUsd;
                 // Override header values with in-band data (more reliable than CORS headers)
-                if (chunk.x_coalesce.tier) routingTier = chunk.x_coalesce.tier;
-                if (chunk.x_coalesce.provider) routingProvider = chunk.x_coalesce.provider;
-                if (chunk.x_coalesce.model) routingModel = chunk.x_coalesce.model;
-                if (chunk.x_coalesce.attempt) routingAttempt = chunk.x_coalesce.attempt;
+                if (chunk.x_coalesce_route.tier) routingTier = chunk.x_coalesce_route.tier;
+                if (chunk.x_coalesce_route.provider) routingProvider = chunk.x_coalesce_route.provider;
+                if (chunk.x_coalesce_route.model) routingModel = chunk.x_coalesce_route.model;
+                if (chunk.x_coalesce_route.attempt) routingAttempt = chunk.x_coalesce_route.attempt;
               }
 
               if (chunk.usage) {

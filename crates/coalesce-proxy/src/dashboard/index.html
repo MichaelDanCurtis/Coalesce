@@ -331,8 +331,8 @@ async function sendTest() {
         output.textContent = 'Error: ' + data.error.message;
       } else {
         output.textContent = data.choices?.[0]?.message?.content || JSON.stringify(data, null, 2);
-        if (data.x_coalesce) {
-          const x = data.x_coalesce;
+        if (data.x_coalesce_route) {
+          const x = data.x_coalesce_route;
           showRouting(x.tier, x.score?.toFixed(3), x.provider, x.model, x.attempt);
         }
       }

@@ -1,0 +1,94 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: AP
+      - generic [ref=e7]:
+        - heading "Coalesce" [level=1] [ref=e8]
+        - paragraph [ref=e9]: LLM Router
+    - navigation [ref=e10]:
+      - button "Chat" [ref=e11] [cursor=pointer]
+      - button "Overview" [ref=e12] [cursor=pointer]
+      - button "Providers" [ref=e13] [cursor=pointer]
+      - button "Provider Config" [ref=e14] [cursor=pointer]
+      - button "Local LLM" [ref=e15] [cursor=pointer]
+      - button "Cost Analytics" [ref=e16] [cursor=pointer]
+      - button "Usage Metrics" [ref=e17] [cursor=pointer]
+      - button "Routing Playground" [ref=e18] [cursor=pointer]
+      - button "Request Timeline" [ref=e19] [cursor=pointer]
+      - button "System Prompts" [ref=e20] [cursor=pointer]
+      - button "Live Events" [ref=e21] [cursor=pointer]
+      - button "Settings" [ref=e22] [cursor=pointer]
+    - generic [ref=e23]:
+      - button "S System mode" [ref=e24] [cursor=pointer]:
+        - generic [ref=e25]: S
+        - generic [ref=e26]: System mode
+      - generic [ref=e29]: "Proxy: localhost:8402"
+  - main [ref=e30]:
+    - generic [ref=e210]:
+      - generic [ref=e211]:
+        - button "+ New Chat" [ref=e213] [cursor=pointer]
+        - textbox "Search chats..." [ref=e215]
+        - paragraph [ref=e217]: No conversations yet
+      - generic [ref=e218]:
+        - generic [ref=e219]:
+          - combobox [active] [ref=e220]:
+            - option "Any Provider"
+            - option "copilot-personal"
+            - option "copilot-work"
+            - option "glm"
+            - option "kimi" [selected]
+            - option "ollama"
+            - option "openrouter"
+          - combobox [ref=e221]:
+            - option "auto (smart routing)" [selected]
+            - option "claude-haiku-4.5 (copilot-work)"
+            - option "claude-opus-4.5 (copilot-work)"
+            - option "claude-opus-4.6 (copilot-work)"
+            - option "claude-sonnet-4 (copilot-work)"
+            - option "claude-sonnet-4.5 (copilot-work)"
+            - option "claude-sonnet-4.6 (copilot-work)"
+            - option "gemini-2.5-pro (copilot-work)"
+            - option "gemini-3-flash-preview (copilot-work)"
+            - option "gemini-3.1-pro-preview (copilot-work)"
+            - option "gpt-3.5-turbo (copilot-work)"
+            - option "gpt-3.5-turbo-0613 (copilot-work)"
+            - option "gpt-4 (copilot-work)"
+            - option "gpt-4 (copilot-work)"
+            - option "gpt-4 (copilot-personal)"
+            - option "gpt-4"
+            - option "gpt-4-0125-preview (copilot-work)"
+            - option "gpt-4-0613 (copilot-work)"
+            - option "gpt-4-o-preview (copilot-work)"
+            - option "gpt-4-o-preview (copilot-work)"
+            - option "gpt-4-o-preview (copilot-personal)"
+            - option "gpt-4-o-preview"
+            - option "gpt-4.1 (copilot-work)"
+            - option "gpt-4.1-2025-04-14 (copilot-work)"
+            - option "gpt-4o (copilot-work)"
+            - option "gpt-4o-2024-05-13 (copilot-work)"
+            - option "gpt-4o-2024-08-06 (copilot-work)"
+            - option "gpt-4o-2024-11-20 (copilot-work)"
+            - option "gpt-4o-mini (copilot-work)"
+            - option "gpt-4o-mini-2024-07-18 (copilot-work)"
+            - option "gpt-5-mini (copilot-work)"
+            - option "gpt-5.1 (copilot-work)"
+            - option "gpt-5.2 (copilot-work)"
+            - option "gpt-5.2-codex (copilot-work)"
+            - option "gpt-5.3-codex (copilot-work)"
+            - option "gpt-5.4 (copilot-work)"
+            - option "grok-code-fast-1 (copilot-work)"
+            - option "text-embedding-3-small (copilot-work)"
+            - option "text-embedding-3-small-inference (copilot-work)"
+            - option "text-embedding-ada-002 (copilot-work)"
+            - option "kimi-for-coding"
+          - button "Settings" [disabled] [ref=e222]
+        - generic [ref=e224]:
+          - generic [ref=e225]: 💬
+          - paragraph [ref=e226]: Welcome to Coalesce Chat
+          - paragraph [ref=e227]: Start a new conversation or select one from the sidebar
+          - button "New Chat" [ref=e228] [cursor=pointer]
+        - generic [ref=e230]:
+          - button "📎" [ref=e231] [cursor=pointer]
+          - textbox "Start a new chat..." [ref=e232]
+          - button "Send" [disabled] [ref=e233]
+      - generic [ref=e235]: Send a message to see routing

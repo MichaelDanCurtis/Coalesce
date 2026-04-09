@@ -1,0 +1,173 @@
+/* ─── Terminal-styled Chat skin ──────────────────────────────
+ * Applied via .chat-terminal class on Chat root.
+ * Toggle via Settings → Chat theme.
+ * ─────────────────────────────────────────────────────────── */
+
+.chat-terminal {
+  --term-bg: #0b0f0a;
+  --term-bg-alt: #0f140d;
+  --term-fg: #c5e8b0;
+  --term-fg-dim: #6b8a5a;
+  --term-accent: #7fff7f;
+  --term-accent-dim: #4fbf4f;
+  --term-amber: #ffb86c;
+  --term-red: #ff6b6b;
+  --term-border: #1f2a18;
+
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Menlo", monospace;
+  background: var(--term-bg);
+  color: var(--term-fg);
+}
+
+.chat-terminal,
+.chat-terminal * {
+  font-family: inherit;
+}
+
+/* Subtle scanline overlay (toggleable via .chat-terminal--scanlines) */
+.chat-terminal--scanlines {
+  position: relative;
+}
+.chat-terminal--scanlines::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.02) 0px,
+    rgba(255, 255, 255, 0.02) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 50;
+}
+
+/* Window chrome — fake macOS traffic lights */
+.chat-terminal__chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--term-bg-alt);
+  border-bottom: 1px solid var(--term-border);
+  font-size: 11px;
+  color: var(--term-fg-dim);
+}
+.chat-terminal__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+.chat-terminal__dot--red    { background: #ff5f56; }
+.chat-terminal__dot--yellow { background: #ffbd2e; }
+.chat-terminal__dot--green  { background: #27c93f; }
+.chat-terminal__title {
+  flex: 1;
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+
+/* Message turn prompts */
+.chat-terminal__prompt-user {
+  color: var(--term-accent);
+  font-weight: 600;
+  user-select: none;
+}
+.chat-terminal__prompt-user::before {
+  content: "user@coalesce:~$ ";
+}
+.chat-terminal__prompt-assistant {
+  color: var(--term-amber);
+  font-weight: 600;
+  user-select: none;
+}
+.chat-terminal__prompt-assistant::before {
+  content: "assistant > ";
+}
+
+/* Input — blinking block cursor */
+.chat-terminal__input {
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border: 1px solid var(--term-border);
+  caret-color: var(--term-accent);
+}
+.chat-terminal__input:focus {
+  outline: none;
+  border-color: var(--term-accent-dim);
+  box-shadow: 0 0 0 1px var(--term-accent-dim);
+}
+
+@keyframes term-blink {
+  0%, 49%   { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.chat-terminal__cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1em;
+  background: var(--term-accent);
+  vertical-align: text-bottom;
+  animation: term-blink 1s step-end infinite;
+  margin-left: 2px;
+}
+
+/* Override surface colors when terminal skin active */
+.chat-terminal .bg-surface,
+.chat-terminal .bg-surface-alt {
+  background: var(--term-bg) !important;
+}
+.chat-terminal .border-themed {
+  border-color: var(--term-border) !important;
+}
+.chat-terminal .text-primary {
+  color: var(--term-fg) !important;
+}
+.chat-terminal .text-secondary {
+  color: var(--term-fg-dim) !important;
+}
+
+/* Block-type cards (for Phase 19.2 renderer) */
+.chat-terminal__block {
+  border-left: 2px solid var(--term-border);
+  padding: 6px 10px;
+  margin: 4px 0;
+  font-size: 13px;
+}
+.chat-terminal__block--thinking {
+  border-left-color: var(--term-fg-dim);
+  color: var(--term-fg-dim);
+  font-style: italic;
+}
+.chat-terminal__block--tool {
+  border-left-color: var(--term-amber);
+}
+.chat-terminal__block--citation {
+  border-left-color: var(--term-accent-dim);
+  font-size: 11px;
+}
+
+/* Multi-choice buttons */
+.chat-terminal__choice {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--term-accent);
+  border: 1px solid var(--term-border);
+  padding: 6px 10px;
+  margin: 4px 0;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.chat-terminal__choice:hover {
+  background: var(--term-bg-alt);
+  border-color: var(--term-accent-dim);
+}
+.chat-terminal__choice::before {
+  content: "▸ ";
+  color: var(--term-accent);
+}

@@ -1,0 +1,28 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: AP
+      - generic [ref=e7]
+    - navigation [ref=e10]:
+      - button "Chat" [ref=e11] [cursor=pointer]
+      - button "Overview" [ref=e12] [cursor=pointer]
+      - button "Providers" [ref=e13] [cursor=pointer]
+      - button "Provider Config" [ref=e14] [cursor=pointer]
+      - button "Local LLM" [ref=e15] [cursor=pointer]
+      - button "Cost Analytics" [ref=e16] [cursor=pointer]
+      - button "Usage Metrics" [ref=e17] [cursor=pointer]
+      - button "Routing Playground" [ref=e18] [cursor=pointer]
+      - button "Request Timeline" [ref=e19] [cursor=pointer]
+      - button "System Prompts" [ref=e20] [cursor=pointer]
+      - button "Live Events" [ref=e21] [cursor=pointer]
+      - button "Settings" [ref=e22] [cursor=pointer]
+    - generic [ref=e23]:
+      - button "S System mode" [ref=e24] [cursor=pointer]
+      - generic [ref=e29]: "Proxy: localhost:8402"
+  - main [ref=e30]:
+    - generic [ref=e31]:
+      - heading "Overview" [level=2] [ref=e33]
+      - generic [ref=e34]
+      - generic [ref=e48]
+      - generic [ref=e64]
+      - generic [ref=e97]

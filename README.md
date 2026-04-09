@@ -98,11 +98,11 @@ curl http://127.0.0.1:8402/v1/chat/completions \
   }'
 ```
 
-The response includes routing metadata in the `x_coalesce` field:
+The response includes routing metadata in the `x_coalesce_route` field:
 
 ```json
 {
-  "x_coalesce": {
+  "x_coalesce_route": {
     "tier": "Simple",
     "score": 0.05,
     "provider": "ollama",
@@ -189,7 +189,7 @@ The response includes routing metadata in the `x_coalesce` field:
 6. **Rosetta Translation** -- If the request includes tools, the Rosetta layer translates between provider-specific tool formats and substitutes equivalent tools from the canonical registry
 7. **Dispatch** -- The request is sent to the top-ranked candidate. Circuit breakers gate access (open = skip, half-open = test one request)
 8. **Fallback** -- If the provider fails (timeout, 5xx, auth error), the router moves to the next candidate. Auth-failed providers are skipped without burning attempt slots. Up to 3 attempts
-9. **Response** -- The response streams back through the proxy with routing metadata in headers and the `x_coalesce` field. Thinking/reasoning tokens are passed through for models that support them
+9. **Response** -- The response streams back through the proxy with routing metadata in headers and the `x_coalesce_route` field. Per-chunk canonical Rosetta blocks are attached in a sibling `x_coalesce` field. Thinking/reasoning tokens are passed through for models that support them
 10. **Accounting** -- Cost is recorded, quota state updated, circuit breaker notified of success/failure, and the request is logged to SQLite
 
 ### Billing Types

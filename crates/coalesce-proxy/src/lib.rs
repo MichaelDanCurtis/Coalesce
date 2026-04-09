@@ -1217,7 +1217,7 @@ async fn chat_completions(
                                 input_tokens: None, output_tokens: None, cost_usd: None,
                                 latency_ms: Some(start.elapsed().as_millis() as u64), success: true,
                             });
-                            resp["x_coalesce"] = serde_json::json!({
+                            resp["x_coalesce_route"] = serde_json::json!({
                                 "tier": "direct", "score": 0.0,
                                 "provider": &target_model.provider, "model": &target_model.id,
                                 "attempt": 1
@@ -1714,7 +1714,7 @@ async fn chat_completions(
                     let routing_meta = format!(
                         "data: {}\n\n",
                         serde_json::json!({
-                            "x_coalesce": {
+                            "x_coalesce_route": {
                                 "tier": scoring.tier.to_string(),
                                 "score": scoring.score,
                                 "provider": selected_model.provider,
@@ -1834,7 +1834,7 @@ async fn chat_completions(
                             // Inject routing metadata
                             if let Some(obj) = response_json.as_object_mut() {
                                 obj.insert(
-                                    "x_coalesce".to_string(),
+                                    "x_coalesce_route".to_string(),
                                     serde_json::json!({
                                         "tier": scoring.tier.to_string(),
                                         "score": scoring.score,
