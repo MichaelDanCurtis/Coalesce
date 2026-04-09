@@ -213,10 +213,24 @@ export function canonicalToLocalBlocks(canonical: CanonicalBlock[]): Block[] {
     }
   }
 
+  // Merge consecutive text blocks into one so streaming deltas
+  // (one word per CanonicalBlock) don't each render as a separate <div>.
+  const merged: Block[] = [];
+  for (const b of out) {
+    const prev = merged.length > 0 ? merged[merged.length - 1] : null;
+    if (b.kind === "text" && prev && prev.kind === "text") {
+      merged[merged.length - 1] = { kind: "text", text: prev.text + b.text };
+    } else if (b.kind === "thinking" && prev && prev.kind === "thinking") {
+      merged[merged.length - 1] = { kind: "thinking", text: prev.text + b.text };
+    } else {
+      merged.push(b);
+    }
+  }
+
   // Run the respond_with_choices post-processing over the mapped
   // blocks so tool-driven multi-choice still materializes into a
   // choices block even on the canonical path.
-  return out.map((b) => {
+  return merged.map((b) => {
     if (b.kind === "tool_call" && b.name === "respond_with_choices") {
       const parsed = parseRespondWithChoicesArgs(b.args);
       if (parsed) {
