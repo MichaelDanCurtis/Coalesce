@@ -3881,30 +3881,39 @@ async fn api_huggingface_search(
 async fn api_ollama_library_tags(
     AxumPath(model): AxumPath<String>,
 ) -> Response {
-    let client = reqwest::Client::new();
-    // Try the Ollama registry API
-    let url = format!("https://registry.ollama.ai/v2/library/{}/tags/list", model);
-    match client.get(&url)
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    // Scrape tags from ollama.com model page (registry API requires auth)
+    let url = format!("https://ollama.com/library/{}", model);
+    match client.get(&url)
+        .header("User-Agent", "Coalesce/0.1.0")
         .send().await
     {
         Ok(resp) if resp.status().is_success() => {
-            match resp.json::<serde_json::Value>().await {
-                Ok(json) => {
-                    let tags = json.get("tags")
-                        .and_then(|t| t.as_array())
-                        .cloned()
-                        .unwrap_or_default();
-                    Json(serde_json::json!({"model": model, "tags": tags})).into_response()
+            let html = resp.text().await.unwrap_or_default();
+            // Extract tags from href="/library/{model}:{tag}" links
+            let prefix = format!("href=\"/library/{}:", model);
+            let mut tags: Vec<String> = Vec::new();
+            for chunk in html.split(&prefix).skip(1) {
+                if let Some(end) = chunk.find('"') {
+                    let tag = chunk[..end].to_string();
+                    if !tag.is_empty() && !tags.contains(&tag) {
+                        tags.push(tag);
+                    }
                 }
-                Err(_) => Json(serde_json::json!({"model": model, "tags": []})).into_response(),
             }
+            if tags.is_empty() {
+                tags.push("latest".to_string());
+            }
+            Json(serde_json::json!({"model": model, "tags": tags})).into_response()
         }
         _ => {
-            // Fallback: common tag patterns
             Json(serde_json::json!({
                 "model": model,
-                "tags": ["latest", "q4_0", "q4_K_M", "q5_0", "q5_K_M", "q8_0", "fp16"],
+                "tags": ["latest"],
                 "source": "fallback"
             })).into_response()
         }
