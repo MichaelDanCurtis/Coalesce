@@ -2,6 +2,7 @@ import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { detectChoices, parseRespondWithChoicesArgs } from "./multichoice";
+import type { CanonicalBlock } from "../../types/rosetta";
 
 // ─── Block types ─────────────────────────────────────────────
 // Targets the canonical Rosetta normalized response shape
@@ -122,6 +123,113 @@ export function parseBlocks(content: string): Block[] {
   }
 
   return withTool;
+}
+
+// ─── Canonical Rosetta → local Block mapper ────────────────
+//
+// Used when the proxy emits `x_coalesce` canonical blocks per
+// SSE chunk (Ticket B2). Streamed tool calls arrive as a trio
+// of tool_call_start / tool_call_delta* / tool_call_end frames
+// keyed by id — this function aggregates them into one local
+// `tool_call` block with the fully-accumulated arguments JSON.
+// Non-streaming providers emit a single `tool_call` frame and
+// bypass the aggregator.
+export function canonicalToLocalBlocks(canonical: CanonicalBlock[]): Block[] {
+  const out: Block[] = [];
+  // Map tool_call id → index in `out` so deltas can append to the
+  // same tool_call block regardless of interleaving with text.
+  const toolIdx = new Map<string, number>();
+
+  for (const c of canonical) {
+    switch (c.kind) {
+      case "text":
+        out.push({ kind: "text", text: c.text });
+        break;
+      case "thinking":
+        out.push({ kind: "thinking", text: c.text });
+        break;
+      case "tool_call_start": {
+        const idx = out.length;
+        out.push({ kind: "tool_call", id: c.id, name: c.name, args: "" });
+        toolIdx.set(c.id, idx);
+        break;
+      }
+      case "tool_call_delta": {
+        const idx = toolIdx.get(c.id);
+        if (idx !== undefined) {
+          const existing = out[idx] as Extract<Block, { kind: "tool_call" }>;
+          out[idx] = { ...existing, args: existing.args + c.arguments_delta };
+        }
+        break;
+      }
+      case "tool_call_end": {
+        // Pretty-print accumulated JSON args if possible; harmless no-op
+        // when the block is already a complete tool_call from a
+        // non-streaming provider.
+        const idx = toolIdx.get(c.id);
+        if (idx !== undefined) {
+          const existing = out[idx] as Extract<Block, { kind: "tool_call" }>;
+          try {
+            const parsed = JSON.parse(existing.args || "{}");
+            out[idx] = {
+              ...existing,
+              args: JSON.stringify(parsed, null, 2),
+            };
+          } catch {
+            /* keep raw accumulated delta string */
+          }
+        }
+        break;
+      }
+      case "tool_call": {
+        // Fully-formed (non-streaming) tool call.
+        out.push({
+          kind: "tool_call",
+          id: c.id,
+          name: c.name,
+          args: JSON.stringify(c.arguments ?? {}, null, 2),
+        });
+        break;
+      }
+      case "tool_result":
+        out.push({ kind: "tool_result", callId: c.tool_call_id, text: c.content });
+        break;
+      case "citation":
+        out.push({
+          kind: "citation",
+          index: out.filter((b) => b.kind === "citation").length + 1,
+          url: c.source,
+          text: c.text,
+        });
+        break;
+      case "image":
+        // No local image block kind yet — surface as text pointer
+        // until the renderer supports it. TODO(rosetta): real image block.
+        out.push({
+          kind: "text",
+          text: c.url ? `![image](${c.url})` : `[image:${c.media_type}]`,
+        });
+        break;
+    }
+  }
+
+  // Run the respond_with_choices post-processing over the mapped
+  // blocks so tool-driven multi-choice still materializes into a
+  // choices block even on the canonical path.
+  return out.map((b) => {
+    if (b.kind === "tool_call" && b.name === "respond_with_choices") {
+      const parsed = parseRespondWithChoicesArgs(b.args);
+      if (parsed) {
+        return {
+          kind: "choices" as const,
+          question: parsed.question,
+          options: parsed.options,
+          source: "tool" as const,
+        };
+      }
+    }
+    return b;
+  });
 }
 
 // ─── Renderers ───────────────────────────────────────────────

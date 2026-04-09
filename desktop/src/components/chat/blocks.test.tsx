@@ -10,7 +10,8 @@
 // If a runner is added later, swap `test`/`assertEq` for its
 // primitives. The assertions themselves are the spec.
 
-import { parseBlocks, type Block } from "./blocks";
+import { parseBlocks, canonicalToLocalBlocks, type Block } from "./blocks";
+import type { CanonicalBlock } from "../../types/rosetta";
 
 type TestFn = () => void;
 const cases: Array<{ name: string; fn: TestFn }> = [];
@@ -103,6 +104,41 @@ test("parseBlocks converts respond_with_choices tool-call into choices block", (
   assertEq(choice.source, "tool", "tool source");
   assertEq(choice.question, "pick one", "tool question");
   assertEq(choice.options, ["a", "b"], "tool options");
+});
+
+test("canonicalToLocalBlocks aggregates streamed tool-call deltas by id", () => {
+  const canonical: CanonicalBlock[] = [
+    { kind: "thinking", text: "considering tools" },
+    { kind: "tool_call_start", id: "call_1", name: "get_weather" },
+    { kind: "tool_call_delta", id: "call_1", arguments_delta: '{"city":' },
+    { kind: "tool_call_delta", id: "call_1", arguments_delta: '"Tokyo"}' },
+    { kind: "tool_call_end", id: "call_1" },
+    { kind: "text", text: "Here's the forecast." },
+  ];
+  const bs = canonicalToLocalBlocks(canonical);
+  assertEq(kinds(bs), ["thinking", "tool_call", "text"], "3 aggregated blocks");
+  const tc = bs[1] as Extract<Block, { kind: "tool_call" }>;
+  assertEq(tc.name, "get_weather", "tool name preserved");
+  assertEq(tc.id, "call_1", "tool id preserved");
+  // tool_call_end pretty-prints the accumulated JSON.
+  const parsed = JSON.parse(tc.args);
+  assertEq(parsed.city, "Tokyo", "args accumulated across deltas");
+});
+
+test("canonicalToLocalBlocks maps fully-formed tool_call and respond_with_choices", () => {
+  const canonical: CanonicalBlock[] = [
+    {
+      kind: "tool_call",
+      id: "c1",
+      name: "respond_with_choices",
+      arguments: { question: "pick", options: ["x", "y"] },
+    },
+  ];
+  const bs = canonicalToLocalBlocks(canonical);
+  assertEq(kinds(bs), ["choices"], "tool-call becomes choices block");
+  const ch = bs[0] as Extract<Block, { kind: "choices" }>;
+  assertEq(ch.source, "tool", "tool source");
+  assertEq(ch.options, ["x", "y"], "options preserved");
 });
 
 // Runner — executes when file is loaded directly via tsx.
