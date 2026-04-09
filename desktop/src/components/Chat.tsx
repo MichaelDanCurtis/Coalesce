@@ -1132,16 +1132,6 @@ export default function Chat() {
       onDragOver={(e) => e.preventDefault()}
     >
       <div className="chat-terminal__chrome">
-        <span className="chat-terminal__dot chat-terminal__dot--red" />
-        <span className="chat-terminal__dot chat-terminal__dot--yellow" />
-        <span className="chat-terminal__dot chat-terminal__dot--green" />
-        <button
-          onClick={() => setShowCheatsheet(true)}
-          className="text-[11px] opacity-60 hover:opacity-100 ml-2"
-          title="Keyboard shortcuts (?)"
-        >
-          ?
-        </button>
         <span className="chat-terminal__title">
           coalesce — {active?.model || selectedModel || "chat"}
           {contextFill ? (
@@ -1348,6 +1338,15 @@ export default function Chat() {
               Export
             </button>
           )}
+
+          <div className="ml-auto" />
+          <button
+            onClick={() => setShowCheatsheet(true)}
+            className="px-2 py-1.5 text-xs rounded-md bg-surface-alt border border-themed text-secondary hover:text-primary transition-colors"
+            title="Keyboard shortcuts (?)"
+          >
+            ?
+          </button>
         </div>
 
         {/* Settings panel (collapsible) */}

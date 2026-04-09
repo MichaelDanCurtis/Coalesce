@@ -732,6 +732,7 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/ollama/models/{model}/load", post(api_ollama_load))
         .route("/api/v1/ollama/models/{model}/gpu-layers", post(api_ollama_gpu_layers))
         .route("/api/v1/ollama/preload", get(api_ollama_preload_list))
+        .route("/api/v1/huggingface/search", get(api_huggingface_search))
         .route("/api/v1/ollama/import", post(api_ollama_import))
         .route("/api/v1/ollama/resources", get(api_ollama_resources))
         .route("/api/v1/auth/google/start", post(api_google_auth_start))
@@ -3684,17 +3685,45 @@ async fn api_ollama_library_search(
                 }
             }).collect::<Vec<_>>().join(" ");
 
-        models.push(serde_json::json!({
+        // Estimate RAM for smallest listed size (Q4 quant ≈ 0.6x params in GB)
+        let ram_estimate_gb: Option<f64> = sizes.split(',')
+            .filter_map(|s| {
+                let s = s.trim().to_lowercase();
+                if s.ends_with('b') {
+                    s.trim_end_matches('b').parse::<f64>().ok().map(|n| n * 0.6)
+                } else {
+                    None
+                }
+            })
+            .reduce(f64::min);
+
+        let mut entry = serde_json::json!({
             "name": name,
             "label": label,
             "sizes": if sizes.is_empty() { "various".to_string() } else { sizes },
             "description": if description.is_empty() { "—".to_string() } else { description },
+            "source": "ollama",
             "pulls": pulls,
             "updated": updated,
-        }));
+        });
+        if let Some(ram) = ram_estimate_gb {
+            entry["ram_estimate_gb"] = serde_json::json!(ram);
+        }
+        models.push(entry);
     }
 
     Json(serde_json::json!({"models": models}))
+}
+
+/// Decode common HTML entities.
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+     .replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&#39;", "'")
+     .replace("&apos;", "'")
+     .replace("&nbsp;", " ")
 }
 
 /// Extract text between an opening tag (partial) and a closing tag.
@@ -3715,7 +3744,7 @@ fn extract_text_between(html: &str, open: &str, close: &str) -> Option<String> {
         else if ch == '>' { in_tag = false; }
         else if !in_tag { result.push(ch); }
     }
-    let trimmed = result.trim().to_string();
+    let trimmed = decode_html_entities(result.trim());
     if trimmed.is_empty() { None } else { Some(trimmed) }
 }
 
@@ -3734,7 +3763,118 @@ fn extract_inner_text(segment: &str) -> String {
         else if ch == '>' { in_tag = false; }
         else if !in_tag { result.push(ch); }
     }
-    result
+    decode_html_entities(&result)
+}
+
+/// GET /api/v1/huggingface/search — search HuggingFace for GGUF models compatible with Ollama
+async fn api_huggingface_search(
+    Query(params): Query<LibrarySearchParams>,
+) -> Json<serde_json::Value> {
+    let query = params.q.unwrap_or_default();
+    if query.is_empty() {
+        return Json(serde_json::json!({"models": []}));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let url = format!(
+        "https://huggingface.co/api/models?search={}&filter=gguf&sort=downloads&direction=-1&limit=30",
+        query.replace(' ', "+")
+    );
+
+    let resp = match client.get(&url)
+        .header("User-Agent", "Coalesce/0.1.0")
+        .send().await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => {
+            return Json(serde_json::json!({"models": [], "error": "Failed to fetch from HuggingFace"}));
+        }
+    };
+
+    let items: Vec<serde_json::Value> = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(serde_json::json!({"models": [], "error": "Invalid JSON from HuggingFace"}));
+        }
+    };
+
+    let mut models: Vec<serde_json::Value> = Vec::new();
+    for item in &items {
+        let model_id = item.get("modelId").and_then(|v| v.as_str()).unwrap_or_default();
+        if model_id.is_empty() { continue; }
+
+        let downloads = item.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0);
+        let likes = item.get("likes").and_then(|v| v.as_u64()).unwrap_or(0);
+        let pipeline_tag = item.get("pipeline_tag").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Extract parameter count from tags or model name (e.g., "7b", "13b", "70B")
+        let tags = item.get("tags").and_then(|v| v.as_array());
+        let mut param_size = String::new();
+        let mut ram_estimate_gb: Option<f64> = None;
+
+        // Try tags first
+        if let Some(tags) = tags {
+            for tag in tags {
+                if let Some(t) = tag.as_str() {
+                    let lower = t.to_lowercase();
+                    if lower.ends_with('b') {
+                        if let Ok(n) = lower.trim_end_matches('b').parse::<f64>() {
+                            param_size = t.to_string();
+                            ram_estimate_gb = Some(n * 0.6);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: extract from model name (e.g., "Llama-3.2-1B-Instruct", "mistral-7b")
+        if param_size.is_empty() {
+            for part in model_id.split(&['-', '_', '.'][..]) {
+                let lower = part.to_lowercase();
+                if lower.ends_with('b') {
+                    if let Ok(n) = lower.trim_end_matches('b').parse::<f64>() {
+                        if (0.1..=1000.0).contains(&n) {
+                            param_size = format!("{n}B");
+                            ram_estimate_gb = Some(n * 0.6);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Generate display name from model_id
+        let label = model_id.split('/').last().unwrap_or(model_id)
+            .split('-').map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                }
+            }).collect::<Vec<_>>().join(" ");
+
+        let mut entry = serde_json::json!({
+            "name": model_id,
+            "label": label,
+            "sizes": if param_size.is_empty() { "unknown".to_string() } else { param_size },
+            "description": format!("{}{}", pipeline_tag, if !pipeline_tag.is_empty() { " · " } else { "" }),
+            "source": "huggingface",
+            "downloads": downloads,
+            "likes": likes,
+        });
+
+        if let Some(ram) = ram_estimate_gb {
+            entry["ram_estimate_gb"] = serde_json::json!(ram);
+        }
+
+        models.push(entry);
+    }
+
+    Json(serde_json::json!({"models": models}))
 }
 
 /// GET /api/v1/ollama/library/{model}/tags — get available tags for a model from registry

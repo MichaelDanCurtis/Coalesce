@@ -43,7 +43,7 @@
   z-index: 50;
 }
 
-/* Window chrome — fake macOS traffic lights */
+/* Window chrome — title bar */
 .chat-terminal__chrome {
   display: flex;
   align-items: center;
@@ -54,14 +54,6 @@
   font-size: 11px;
   color: var(--term-fg-dim);
 }
-.chat-terminal__dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-}
-.chat-terminal__dot--red    { background: #ff5f56; }
-.chat-terminal__dot--yellow { background: #ffbd2e; }
-.chat-terminal__dot--green  { background: #27c93f; }
 .chat-terminal__title {
   flex: 1;
   text-align: center;

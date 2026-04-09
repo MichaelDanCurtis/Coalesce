@@ -27,6 +27,12 @@ interface LibraryModel {
   label: string;
   sizes: string;
   description: string;
+  source?: string;
+  ram_estimate_gb?: number;
+  downloads?: number;
+  likes?: number;
+  pulls?: string;
+  updated?: string;
 }
 
 interface BenchmarkResult {
@@ -691,18 +697,72 @@ function PullModel() {
 function ModelBrowser() {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
-  const [models, setModels] = useState<LibraryModel[]>([]);
+  const [ollamaModels, setOllamaModels] = useState<LibraryModel[]>([]);
+  const [hfModels, setHfModels] = useState<LibraryModel[]>([]);
   const [expanded, setExpanded] = useState(false);
+  const [source, setSource] = useState<"ollama" | "huggingface">("ollama");
+  const [ramFilter, setRamFilter] = useState(false);
+  const [systemRam, setSystemRam] = useState<number | null>(null);
+  const [loadingOllama, setLoadingOllama] = useState(false);
+  const [loadingHf, setLoadingHf] = useState(false);
 
+  // Fetch system RAM once
+  useEffect(() => {
+    api.ollamaResources().then(data => {
+      if (data.system?.total_bytes) {
+        setSystemRam(data.system.total_bytes / (1024 * 1024 * 1024));
+      }
+    }).catch(() => {});
+  }, []);
+
+  // Search Ollama
   useEffect(() => {
     const timeout = setTimeout(async () => {
+      setLoadingOllama(true);
       try {
         const data = await api.ollamaLibrarySearch(query || undefined);
-        setModels(data.models ?? []);
+        setOllamaModels(data.models ?? []);
       } catch {}
+      setLoadingOllama(false);
     }, 300);
     return () => clearTimeout(timeout);
   }, [query]);
+
+  // Search HuggingFace (only when tab active + query non-empty)
+  useEffect(() => {
+    if (source !== "huggingface" || !query.trim()) {
+      setHfModels([]);
+      return;
+    }
+    const timeout = setTimeout(async () => {
+      setLoadingHf(true);
+      try {
+        const data = await api.huggingfaceSearch(query);
+        setHfModels(data.models ?? []);
+      } catch {}
+      setLoadingHf(false);
+    }, 400);
+    return () => clearTimeout(timeout);
+  }, [query, source]);
+
+  const models = source === "ollama" ? ollamaModels : hfModels;
+  const loading = source === "ollama" ? loadingOllama : loadingHf;
+
+  // Apply RAM filter
+  const filtered = ramFilter && systemRam
+    ? models.filter(m => !m.ram_estimate_gb || m.ram_estimate_gb <= systemRam)
+    : models;
+
+  const fitsInRam = (m: LibraryModel) => {
+    if (!m.ram_estimate_gb || !systemRam) return true;
+    return m.ram_estimate_gb <= systemRam;
+  };
+
+  const formatNumber = (n: number) => {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return String(n);
+  };
 
   return (
     <div>
@@ -716,23 +776,95 @@ function ModelBrowser() {
 
       {expanded && (
         <div className="card">
+          {/* Source tabs */}
+          <div className="flex items-center gap-2 mb-3">
+            <button
+              onClick={() => setSource("ollama")}
+              className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                source === "ollama"
+                  ? "bg-brand-600/20 text-brand-300 border-brand-500"
+                  : "bg-tertiary border-themed text-secondary hover:text-primary"
+              }`}
+            >
+              Ollama Library
+            </button>
+            <button
+              onClick={() => setSource("huggingface")}
+              className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
+                source === "huggingface"
+                  ? "bg-brand-600/20 text-brand-300 border-brand-500"
+                  : "bg-tertiary border-themed text-secondary hover:text-primary"
+              }`}
+            >
+              HuggingFace (GGUF)
+            </button>
+
+            <div className="ml-auto flex items-center gap-2">
+              {systemRam && (
+                <label className="flex items-center gap-1.5 text-xs text-secondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={ramFilter}
+                    onChange={e => setRamFilter(e.target.checked)}
+                    className="rounded"
+                  />
+                  RAM filter ({systemRam.toFixed(0)} GB)
+                </label>
+              )}
+            </div>
+          </div>
+
           <input
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder={t("localllm.search_placeholder")}
+            placeholder={source === "ollama" ? t("localllm.search_placeholder") : "Search HuggingFace for GGUF models..."}
             className="w-full rounded-lg border border-themed bg-tertiary px-3 py-2 text-sm mb-3 focus:border-brand-500 focus:outline-none"
           />
+
+          {source === "huggingface" && !query.trim() && (
+            <p className="text-xs text-secondary text-center py-4">Type a search query to find GGUF models on HuggingFace</p>
+          )}
+
+          {loading && (
+            <p className="text-xs text-secondary text-center py-2">Searching...</p>
+          )}
+
           <div className="grid grid-cols-1 gap-2 max-h-80 overflow-y-auto lg:grid-cols-2">
-            {models.map(m => (
-              <div key={m.name} className="flex items-start justify-between p-2 rounded-lg bg-tertiary">
-                <div className="min-w-0">
-                  <p className="font-mono text-xs font-medium">{m.name}</p>
-                  <p className="text-xs text-secondary">{m.label}</p>
-                  <p className="text-xs text-secondary mt-0.5">{m.description}</p>
-                  <p className="text-xs text-secondary mt-0.5">Sizes: {m.sizes}</p>
+            {filtered.map(m => {
+              const fits = fitsInRam(m);
+              return (
+                <div
+                  key={`${m.source || "ollama"}-${m.name}`}
+                  className={`flex items-start justify-between p-2 rounded-lg bg-tertiary ${
+                    !fits ? "opacity-40" : ""
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="font-mono text-xs font-medium truncate">{m.name}</p>
+                      {m.ram_estimate_gb && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${
+                          fits ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"
+                        }`}>
+                          ~{m.ram_estimate_gb.toFixed(1)} GB
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-secondary mt-0.5 line-clamp-2">{m.description}</p>
+                    <div className="flex items-center gap-2 mt-1 text-[10px] text-secondary">
+                      <span>Sizes: {m.sizes}</span>
+                      {m.pulls && <span>· {m.pulls}</span>}
+                      {m.downloads != null && <span>· {formatNumber(m.downloads)} downloads</span>}
+                      {m.likes != null && m.likes > 0 && <span>· {formatNumber(m.likes)} likes</span>}
+                      {m.updated && <span>· {m.updated}</span>}
+                    </div>
+                    {!fits && (
+                      <p className="text-[10px] text-red-400 mt-0.5">Exceeds system RAM</p>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

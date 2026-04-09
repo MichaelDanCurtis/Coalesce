@@ -233,7 +233,12 @@ export const api = {
 
   async ollamaLibrarySearch(q?: string) {
     const qs = q ? `?q=${encodeURIComponent(q)}` : "";
-    return httpGet<{ models: Array<{ name: string; label: string; sizes: string; description: string }> }>(`/api/v1/ollama/library/search${qs}`);
+    return httpGet<{ models: Array<{ name: string; label: string; sizes: string; description: string; source?: string; ram_estimate_gb?: number; downloads?: number; likes?: number; pulls?: string; updated?: string }> }>(`/api/v1/ollama/library/search${qs}`);
+  },
+
+  async huggingfaceSearch(q: string) {
+    const qs = `?q=${encodeURIComponent(q)}`;
+    return httpGet<{ models: Array<{ name: string; label: string; sizes: string; description: string; source: string; ram_estimate_gb?: number; downloads?: number; likes?: number }> }>(`/api/v1/huggingface/search${qs}`);
   },
 
   async ollamaLibraryTags(model: string) {
