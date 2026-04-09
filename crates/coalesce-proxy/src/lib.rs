@@ -3596,54 +3596,145 @@ struct LibrarySearchParams {
 }
 
 /// Popular Ollama models with metadata for browsing
-const OLLAMA_LIBRARY: &[(&str, &str, &str, &str)] = &[
-    ("llama3.2", "Meta Llama 3.2", "1B, 3B", "Fast, lightweight, great for simple tasks"),
-    ("llama3.3", "Meta Llama 3.3", "70B", "Top-tier open model for complex reasoning"),
-    ("phi4-mini", "Microsoft Phi-4 Mini", "3.8B", "Small but powerful reasoning model"),
-    ("qwen2.5", "Alibaba Qwen 2.5", "0.5B-72B", "Excellent multilingual, code, math"),
-    ("qwen2.5-coder", "Qwen 2.5 Coder", "1.5B-32B", "Specialized for code generation"),
-    ("deepseek-r1", "DeepSeek R1", "1.5B-671B", "Chain-of-thought reasoning model"),
-    ("mistral", "Mistral 7B", "7B", "Fast, efficient general-purpose model"),
-    ("mixtral", "Mixtral 8x7B", "47B MoE", "Mixture of experts, fast for its size"),
-    ("gemma2", "Google Gemma 2", "2B, 9B, 27B", "Google's efficient open model"),
-    ("codellama", "Code Llama", "7B-70B", "Meta's code-specialized model"),
-    ("llava", "LLaVA", "7B, 13B", "Vision + language multimodal model"),
-    ("nomic-embed-text", "Nomic Embed", "137M", "Text embeddings model"),
-    ("starcoder2", "StarCoder 2", "3B-15B", "Code completion and generation"),
-    ("command-r", "Cohere Command R", "35B", "Enterprise RAG and tool use"),
-    ("dolphin-mixtral", "Dolphin Mixtral", "47B MoE", "Uncensored, creative responses"),
-    ("neural-chat", "Intel Neural Chat", "7B", "Conversational AI optimized"),
-    ("yi", "01.AI Yi", "6B-34B", "Strong bilingual EN/ZH model"),
-    ("solar", "Upstage Solar", "10.7B", "High-quality Korean/English model"),
-    ("nous-hermes2", "Nous Hermes 2", "7B-34B", "Fine-tuned for helpfulness"),
-    ("wizard-vicuna", "Wizard Vicuna", "13B", "Creative writing and conversation"),
-];
-
-/// GET /api/v1/ollama/library/search — search available models
+/// GET /api/v1/ollama/library/search — search available models (live from ollama.com)
 async fn api_ollama_library_search(
     Query(params): Query<LibrarySearchParams>,
 ) -> Json<serde_json::Value> {
-    let query = params.q.unwrap_or_default().to_lowercase();
+    let query = params.q.unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_default();
 
-    let results: Vec<serde_json::Value> = OLLAMA_LIBRARY.iter()
-        .filter(|(name, label, sizes, desc)| {
-            query.is_empty()
-                || name.contains(&query)
-                || label.to_lowercase().contains(&query)
-                || sizes.to_lowercase().contains(&query)
-                || desc.to_lowercase().contains(&query)
-        })
-        .map(|(name, label, sizes, desc)| {
-            serde_json::json!({
-                "name": name,
-                "label": label,
-                "sizes": sizes,
-                "description": desc,
-            })
-        })
-        .collect();
+    // Scrape ollama.com/search — no public JSON API exists.
+    let url = if query.is_empty() {
+        "https://ollama.com/search".to_string()
+    } else {
+        format!("https://ollama.com/search?q={}", query.replace(' ', "+"))
+    };
 
-    Json(serde_json::json!({"models": results}))
+    let html = match client.get(&url)
+        .header("User-Agent", "Coalesce/0.1.0")
+        .send().await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            resp.text().await.unwrap_or_default()
+        }
+        _ => {
+            return Json(serde_json::json!({"models": [], "error": "Failed to fetch from ollama.com"}));
+        }
+    };
+
+    // Parse model cards from HTML. Each model is an <li> with an <a> linking
+    // to the model page. We extract name, description, pulls, tags, and updated time.
+    let mut models: Vec<serde_json::Value> = Vec::new();
+
+    // Pattern: <a href="/library/{name}" ...> blocks containing model info
+    // The page uses structured list items with model metadata.
+    for segment in html.split("<li").skip(1) {
+        // Find model link: href="/library/modelname"
+        let name = if let Some(href_start) = segment.find("href=\"/library/") {
+            let after = &segment[href_start + 15..];
+            if let Some(end) = after.find('"') {
+                after[..end].to_string()
+            } else { continue; }
+        } else { continue; };
+
+        // Extract text content after the name heading — typically the description
+        // Look for the model description in a <p> or span after the name
+        let description = extract_text_between(segment, "<p ", "</p>")
+            .unwrap_or_default();
+
+        // Extract pull count and other metadata spans
+        let mut sizes = String::new();
+        let mut pulls = String::new();
+        let mut updated = String::new();
+
+        // Find spans with metadata: pulls, size info, updated time
+        for span_segment in segment.split("<span").skip(1) {
+            let text = extract_inner_text(span_segment);
+            let trimmed = text.trim();
+            if trimmed.contains("Pull") || trimmed.contains("pull") {
+                pulls = trimmed.to_string();
+            } else if trimmed.contains('B') && (trimmed.contains('x') || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())) {
+                if !sizes.is_empty() { sizes.push_str(", "); }
+                sizes.push_str(trimmed);
+            } else if trimmed.contains("Updated") || trimmed.contains("ago") {
+                updated = trimmed.to_string();
+            }
+        }
+
+        // Also try to grab sizes from capability badges
+        if sizes.is_empty() {
+            for badge in segment.split("x-test-size").skip(1).take(5) {
+                let t = extract_inner_text(badge).trim().to_string();
+                if !t.is_empty() {
+                    if !sizes.is_empty() { sizes.push_str(", "); }
+                    sizes.push_str(&t);
+                }
+            }
+        }
+
+        let label = name.split('/').last().unwrap_or(&name)
+            .split('-').map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                }
+            }).collect::<Vec<_>>().join(" ");
+
+        models.push(serde_json::json!({
+            "name": name,
+            "label": label,
+            "sizes": if sizes.is_empty() { "various".to_string() } else { sizes },
+            "description": if description.is_empty() { "—".to_string() } else { description },
+            "pulls": pulls,
+            "updated": updated,
+        }));
+    }
+
+    Json(serde_json::json!({"models": models}))
+}
+
+/// Extract text between an opening tag (partial) and a closing tag.
+fn extract_text_between(html: &str, open: &str, close: &str) -> Option<String> {
+    let start = html.find(open)?;
+    let after_open = &html[start..];
+    let content_start = after_open.find('>')? + 1;
+    let content = &after_open[content_start..];
+    let end = content.find(close)?;
+    let text = content[..end]
+        .replace("<br>", " ")
+        .replace("<br/>", " ");
+    // Strip remaining HTML tags
+    let mut result = String::new();
+    let mut in_tag = false;
+    for ch in text.chars() {
+        if ch == '<' { in_tag = true; }
+        else if ch == '>' { in_tag = false; }
+        else if !in_tag { result.push(ch); }
+    }
+    let trimmed = result.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
+/// Extract inner text from a partial HTML segment (after a split on the opening tag).
+fn extract_inner_text(segment: &str) -> String {
+    let content_start = segment.find('>').map(|i| i + 1).unwrap_or(0);
+    let content = if let Some(end) = segment[content_start..].find("</") {
+        &segment[content_start..content_start + end]
+    } else {
+        &segment[content_start..content_start + segment[content_start..].len().min(200)]
+    };
+    let mut result = String::new();
+    let mut in_tag = false;
+    for ch in content.chars() {
+        if ch == '<' { in_tag = true; }
+        else if ch == '>' { in_tag = false; }
+        else if !in_tag { result.push(ch); }
+    }
+    result
 }
 
 /// GET /api/v1/ollama/library/{model}/tags — get available tags for a model from registry
