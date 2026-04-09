@@ -188,24 +188,309 @@
   --border-faint: rgba(221, 212, 240, 0.5);
 }
 
+/* ========== Theme: Terminal (dark only) ========== */
+[data-theme="terminal"] {
+  --brand-50: #0d1f0d;
+  --brand-100: #143a14;
+  --brand-200: #1a5a1a;
+  --brand-300: #2a7a2a;
+  --brand-400: #33cc33;
+  --brand-500: #33ff41;
+  --brand-600: #00cc33;
+  --brand-700: #009926;
+  --brand-800: #006619;
+  --brand-900: #00330d;
+  --brand-950: #001a06;
+  --font-heading: 'Share Tech Mono', 'JetBrains Mono', monospace;
+  --font-body: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-size-base: 13px;
+  --line-height: 1.7;
+  --tracking-body: 0.02em;
+  --tracking-head: 0.08em;
+  --radius-card: 0px;
+  --radius-btn: 0px;
+  --radius-input: 0px;
+  --spacing-card: 12px;
+  --shadow-card: none;
+  --shadow-card-hover: 0 0 12px rgba(51, 255, 65, 0.15);
+  --border-width: 1px;
+  --transition-speed: 50ms;
+}
+.dark[data-theme="terminal"] {
+  --surface: #0a0f0a;
+  --surface-alt: #0f140d;
+  --surface-card: #0d160d;
+  --tertiary: #1a3a1a;
+  --hover: #1a3a1a;
+  --text-primary: #33ff41;
+  --text-secondary: #2a8a2a;
+  --border: #2a5a2a;
+  --border-faint: rgba(42, 90, 42, 0.4);
+}
+
+/* ========== Theme: Graphite ========== */
+[data-theme="graphite"] {
+  --brand-50: #f5f5ff;
+  --brand-100: #ededff;
+  --brand-200: #d4d4ff;
+  --brand-300: #a5a5ff;
+  --brand-400: #8080ff;
+  --brand-500: #6366f1;
+  --brand-600: #4f46e5;
+  --brand-700: #4338ca;
+  --brand-800: #3730a3;
+  --brand-900: #312e81;
+  --brand-950: #1e1b4b;
+  --font-heading: 'Inter', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-size-base: 14px;
+  --line-height: 1.6;
+  --tracking-body: 0em;
+  --tracking-head: -0.02em;
+  --radius-card: 6px;
+  --radius-btn: 4px;
+  --radius-input: 4px;
+  --spacing-card: 16px;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --border-width: 1px;
+  --transition-speed: 150ms;
+}
+.dark[data-theme="graphite"] {
+  --surface: #0a0a0a;
+  --surface-alt: #111111;
+  --surface-card: #141414;
+  --tertiary: #1a1a1a;
+  --hover: #1e1e1e;
+  --text-primary: #ededed;
+  --text-secondary: #888888;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-faint: rgba(255, 255, 255, 0.04);
+}
+.light[data-theme="graphite"] {
+  --surface: #fafafa;
+  --surface-alt: #f4f4f4;
+  --surface-card: #ffffff;
+  --tertiary: #eeeeee;
+  --hover: #f0f0f0;
+  --text-primary: #0a0a0a;
+  --text-secondary: #666666;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-faint: rgba(0, 0, 0, 0.04);
+}
+
+/* ========== Theme: Brutus ========== */
+[data-theme="brutus"] {
+  --brand-50: #fff5f2;
+  --brand-100: #ffe5dd;
+  --brand-200: #ffc9b8;
+  --brand-300: #ffa08a;
+  --brand-400: #ff6e4a;
+  --brand-500: #ff3b00;
+  --brand-600: #e03300;
+  --brand-700: #b82900;
+  --brand-800: #8f2000;
+  --brand-900: #661700;
+  --brand-950: #3d0e00;
+  --font-heading: 'Barlow Condensed', 'Impact', sans-serif;
+  --font-body: 'Barlow', system-ui, sans-serif;
+  --font-mono: 'Roboto Mono', monospace;
+  --font-size-base: 15px;
+  --line-height: 1.5;
+  --tracking-body: -0.01em;
+  --tracking-head: -0.03em;
+  --radius-card: 0px;
+  --radius-btn: 0px;
+  --radius-input: 0px;
+  --spacing-card: 20px;
+  --shadow-card: 4px 4px 0px var(--text-primary);
+  --shadow-card-hover: 6px 6px 0px var(--text-primary);
+  --border-width: 2px;
+  --transition-speed: 100ms;
+}
+.dark[data-theme="brutus"] {
+  --surface: #0f0f0f;
+  --surface-alt: #1a1a1a;
+  --surface-card: #1a1a1a;
+  --tertiary: #252525;
+  --hover: #2a2a2a;
+  --text-primary: #f5f0e8;
+  --text-secondary: #999999;
+  --border: #f5f0e8;
+  --border-faint: rgba(245, 240, 232, 0.3);
+}
+.light[data-theme="brutus"] {
+  --surface: #f5f0e8;
+  --surface-alt: #ede8df;
+  --surface-card: #ffffff;
+  --tertiary: #e5e0d6;
+  --hover: #eae5db;
+  --text-primary: #0a0a0a;
+  --text-secondary: #555555;
+  --border: #0a0a0a;
+  --border-faint: rgba(10, 10, 10, 0.2);
+}
+
+/* ========== Theme: Meridian ========== */
+[data-theme="meridian"] {
+  --brand-50: #e6fbff;
+  --brand-100: #ccf7ff;
+  --brand-200: #99eeff;
+  --brand-300: #55e0ff;
+  --brand-400: #00c8ff;
+  --brand-500: #00a8d6;
+  --brand-600: #0088ad;
+  --brand-700: #006885;
+  --brand-800: #00485c;
+  --brand-900: #002833;
+  --brand-950: #00141a;
+  --font-heading: 'Orbitron', 'Exo 2', sans-serif;
+  --font-body: 'Exo 2', system-ui, sans-serif;
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-size-base: 14px;
+  --line-height: 1.65;
+  --tracking-body: 0.03em;
+  --tracking-head: 0.05em;
+  --radius-card: 2px;
+  --radius-btn: 2px;
+  --radius-input: 2px;
+  --spacing-card: 16px;
+  --shadow-card: 0 0 0 1px rgba(0, 200, 255, 0.15), 0 4px 24px rgba(0, 200, 255, 0.06);
+  --shadow-card-hover: 0 0 0 1px rgba(0, 200, 255, 0.4), 0 0 20px rgba(0, 200, 255, 0.15);
+  --border-width: 1px;
+  --transition-speed: 200ms;
+}
+.dark[data-theme="meridian"] {
+  --surface: #060b14;
+  --surface-alt: #0a1020;
+  --surface-card: rgba(13, 25, 48, 0.85);
+  --tertiary: #0f1a30;
+  --hover: #132240;
+  --text-primary: #c8d8f0;
+  --text-secondary: #5a7a9a;
+  --border: rgba(0, 200, 255, 0.2);
+  --border-faint: rgba(0, 200, 255, 0.08);
+}
+.light[data-theme="meridian"] {
+  --surface: #f0f4f8;
+  --surface-alt: #e4eaf2;
+  --surface-card: #ffffff;
+  --tertiary: #d8e0ea;
+  --hover: #dce4ee;
+  --text-primary: #0a1628;
+  --text-secondary: #4a6280;
+  --border: rgba(0, 120, 180, 0.2);
+  --border-faint: rgba(0, 120, 180, 0.08);
+}
+
+/* ========== Theme: Editorial ========== */
+[data-theme="editorial"] {
+  --brand-50: #fef6f0;
+  --brand-100: #fceadb;
+  --brand-200: #f9d1b4;
+  --brand-300: #f0a878;
+  --brand-400: #e07840;
+  --brand-500: #b5451b;
+  --brand-600: #993a17;
+  --brand-700: #7d2f13;
+  --brand-800: #61240f;
+  --brand-900: #45190b;
+  --brand-950: #2a0f07;
+  --font-heading: 'Cormorant Garamond', 'Georgia', serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'DM Mono', monospace;
+  --font-size-base: 15px;
+  --line-height: 1.75;
+  --tracking-body: 0em;
+  --tracking-head: -0.02em;
+  --radius-card: 2px;
+  --radius-btn: 2px;
+  --radius-input: 2px;
+  --spacing-card: 28px;
+  --shadow-card: none;
+  --shadow-card-hover: none;
+  --border-width: 1px;
+  --transition-speed: 200ms;
+}
+.dark[data-theme="editorial"] {
+  --surface: #13110e;
+  --surface-alt: #1a1815;
+  --surface-card: #1e1b17;
+  --tertiary: #2a2620;
+  --hover: #2e2a24;
+  --text-primary: #f0ebe3;
+  --text-secondary: #8a7f72;
+  --border: #2a2620;
+  --border-faint: rgba(42, 38, 32, 0.5);
+}
+.light[data-theme="editorial"] {
+  --surface: #faf7f2;
+  --surface-alt: #f5f1ea;
+  --surface-card: #ffffff;
+  --tertiary: #e8e0d4;
+  --hover: #f0ebe3;
+  --text-primary: #1a1612;
+  --text-secondary: #8a7f72;
+  --border: #e8e0d4;
+  --border-faint: rgba(232, 224, 212, 0.5);
+}
+
+/* ========== Motif theme defaults ========== */
+:root {
+  --font-heading: system-ui, sans-serif;
+  --font-body: system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-size-base: 14px;
+  --line-height: 1.6;
+  --tracking-body: 0em;
+  --tracking-head: 0em;
+  --radius-card: 12px;
+  --radius-btn: 8px;
+  --radius-input: 8px;
+  --spacing-card: 16px;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-card-hover: var(--shadow-card);
+  --border-width: 1px;
+  --transition-speed: 150ms;
+}
+
 @layer base {
   body {
     background-color: var(--surface);
     color: var(--text-primary);
+    font-family: var(--font-body);
+    font-size: var(--font-size-base);
+    line-height: var(--line-height);
+    letter-spacing: var(--tracking-body);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-heading);
+    letter-spacing: var(--tracking-head);
+  }
+  code, pre, kbd, .font-mono {
+    font-family: var(--font-mono);
   }
 }
 
 @layer components {
   .card {
-    @apply rounded-xl p-4;
+    padding: var(--spacing-card);
+    border-radius: var(--radius-card);
     background-color: var(--surface-card);
-    border: 1px solid var(--border);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+    border: var(--border-width) solid var(--border);
+    box-shadow: var(--shadow-card);
+    transition: box-shadow var(--transition-speed) ease, transform var(--transition-speed) ease;
   }
-  .dark .card {
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  .card:hover {
+    box-shadow: var(--shadow-card-hover);
+  }
+  /* Brutus: card hover lift */
+  [data-theme="brutus"] .card:hover {
+    transform: translate(-2px, -2px);
   }
 
   .badge {
@@ -232,7 +517,9 @@
   }
 
   .btn {
-    @apply inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-medium transition-colors;
+    @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium;
+    border-radius: var(--radius-btn);
+    transition: all var(--transition-speed) ease;
   }
   .btn-primary {
     @apply btn text-white;
@@ -251,7 +538,8 @@
   }
 
   .input-field {
-    @apply rounded-lg border p-2.5 text-sm;
+    @apply border p-2.5 text-sm;
+    border-radius: var(--radius-input);
     background-color: var(--tertiary);
     border-color: var(--border);
     color: var(--text-primary);
@@ -268,4 +556,102 @@
   select.input-field {
     appearance: auto;
   }
+}
+
+/* ═══════ Motif-specific effects ═══════ */
+
+/* Terminal: scanlines + phosphor glow + screen curvature */
+[data-theme="terminal"] body {
+  background: radial-gradient(ellipse at center, #0d160d 60%, #050a05 100%);
+}
+[data-theme="terminal"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0px, transparent 2px,
+    rgba(0, 0, 0, 0.12) 2px, rgba(0, 0, 0, 0.12) 4px
+  );
+}
+[data-theme="terminal"] h1,
+[data-theme="terminal"] h2,
+[data-theme="terminal"] h3 {
+  text-transform: uppercase;
+  font-weight: 500;
+}
+[data-theme="terminal"] .card {
+  border-left: 3px solid var(--brand-500);
+}
+[data-theme="terminal"] *:focus-visible {
+  text-shadow: 0 0 8px rgba(51, 255, 65, 0.6);
+}
+
+/* Graphite: top accent stripe */
+[data-theme="graphite"] body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  z-index: 9999;
+  pointer-events: none;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1);
+}
+
+/* Brutus: heading styles + badge overrides */
+[data-theme="brutus"] h1 { font-weight: 900; line-height: 0.95; }
+[data-theme="brutus"] h2 { font-weight: 700; line-height: 1.0; }
+[data-theme="brutus"] h3 { font-weight: 700; text-transform: uppercase; }
+[data-theme="brutus"] .badge {
+  border-radius: 0;
+  border: 2px solid currentColor;
+}
+[data-theme="brutus"] .btn:hover {
+  transform: translate(-1px, -1px);
+}
+
+/* Meridian: background grid + neon glow */
+[data-theme="meridian"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(0, 200, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 200, 255, 0.03) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.dark[data-theme="meridian"] .card {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+[data-theme="meridian"] h1,
+[data-theme="meridian"] h2 {
+  font-weight: 700;
+}
+[data-theme="meridian"] h3 {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.7em;
+}
+
+/* Editorial: elegant typography + no card borders in dark */
+[data-theme="editorial"] h1 {
+  font-weight: 600;
+  font-style: normal;
+}
+[data-theme="editorial"] h2,
+[data-theme="editorial"] h3 {
+  font-weight: 300;
+}
+.dark[data-theme="editorial"] .card {
+  border-color: transparent;
+}
+.light[data-theme="editorial"] .card {
+  border: none;
+  border-top: 1px solid var(--border);
+  box-shadow: none;
 }

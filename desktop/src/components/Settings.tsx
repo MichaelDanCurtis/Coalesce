@@ -24,6 +24,11 @@ const THEMES: { id: ThemeName; label: string; accent: string; preview: string }[
   { id: "ember", label: "Ember", accent: "bg-orange-500", preview: "Warm orange tones" },
   { id: "forest", label: "Forest", accent: "bg-emerald-500", preview: "Natural green tones" },
   { id: "violet", label: "Violet", accent: "bg-violet-500", preview: "Purple accent theme" },
+  { id: "terminal", label: "Terminal", accent: "bg-green-500", preview: "CRT phosphor hacker" },
+  { id: "graphite", label: "Graphite", accent: "bg-zinc-400", preview: "Vercel-style minimal" },
+  { id: "brutus", label: "Brutus", accent: "bg-red-600", preview: "Bold neobrutalist" },
+  { id: "meridian", label: "Meridian", accent: "bg-cyan-400", preview: "Sci-fi HUD neon" },
+  { id: "editorial", label: "Editorial", accent: "bg-amber-800", preview: "Luxury magazine" },
 ];
 
 const MODES: { id: ThemeMode; label: string; desc: string }[] = [
