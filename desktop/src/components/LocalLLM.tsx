@@ -758,6 +758,82 @@ function ModelBrowser() {
     return m.ram_estimate_gb <= systemRam;
   };
 
+  // Selected model → fetch tags/sizes
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [modelTags, setModelTags] = useState<string[]>([]);
+  const [loadingTags, setLoadingTags] = useState(false);
+
+  // Pull queue (browser-local)
+  const [pullQueue, setPullQueue] = useState<Array<{ name: string; status: string; percent: number | null; error?: string }>>([]);
+  const [pulling, setPulling] = useState(false);
+
+  // Fetch tags when model is selected
+  useEffect(() => {
+    if (!selectedModel) { setModelTags([]); return; }
+    setLoadingTags(true);
+    api.ollamaLibraryTags(selectedModel).then(data => {
+      const tags = (data.tags || []).map((t: unknown) => {
+        if (typeof t === "string") return t;
+        if (typeof t === "object" && t !== null && "name" in t) return String((t as Record<string, unknown>).name);
+        return "";
+      }).filter(Boolean) as string[];
+      setModelTags(tags.slice(0, 20));
+    }).catch(() => setModelTags([])).finally(() => setLoadingTags(false));
+  }, [selectedModel]);
+
+  // Pull queue processor
+  useEffect(() => {
+    if (pulling) return;
+    const next = pullQueue.findIndex(q => q.status === "queued");
+    if (next === -1) return;
+    setPulling(true);
+    const model = pullQueue[next].name;
+    setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "pulling" } : q));
+    (async () => {
+      try {
+        const resp = await api.ollamaPull(model);
+        if (!resp.ok) {
+          setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: `HTTP ${resp.status}` } : q));
+          setPulling(false);
+          return;
+        }
+        const reader = resp.body?.getReader();
+        if (!reader) { setPulling(false); return; }
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            const trimmed = line.replace(/^data:\s*/, "").trim();
+            if (!trimmed) continue;
+            try {
+              const parsed = JSON.parse(trimmed);
+              const percent = parsed.total && parsed.completed
+                ? Math.round((parsed.completed / parsed.total) * 100) : null;
+              setPullQueue(prev => prev.map((q, i) =>
+                i === next ? { ...q, status: parsed.status || "pulling", percent } : q
+              ));
+            } catch {}
+          }
+        }
+        setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "success", percent: 100 } : q));
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Failed";
+        setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: msg } : q));
+      }
+      setPulling(false);
+    })();
+  }, [pullQueue, pulling]);
+
+  const startPull = (modelName: string, tag?: string) => {
+    const fullName = tag ? `${modelName}:${tag}` : modelName;
+    setPullQueue(prev => [...prev, { name: fullName, status: "queued", percent: null }]);
+  };
+
   const formatNumber = (n: number) => {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -779,7 +855,7 @@ function ModelBrowser() {
           {/* Source tabs */}
           <div className="flex items-center gap-2 mb-3">
             <button
-              onClick={() => setSource("ollama")}
+              onClick={() => { setSource("ollama"); setSelectedModel(null); }}
               className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
                 source === "ollama"
                   ? "bg-brand-600/20 text-brand-300 border-brand-500"
@@ -789,7 +865,7 @@ function ModelBrowser() {
               Ollama Library
             </button>
             <button
-              onClick={() => setSource("huggingface")}
+              onClick={() => { setSource("huggingface"); setSelectedModel(null); }}
               className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
                 source === "huggingface"
                   ? "bg-brand-600/20 text-brand-300 border-brand-500"
@@ -816,7 +892,7 @@ function ModelBrowser() {
 
           <input
             value={query}
-            onChange={e => setQuery(e.target.value)}
+            onChange={e => { setQuery(e.target.value); setSelectedModel(null); }}
             placeholder={source === "ollama" ? t("localllm.search_placeholder") : "Search HuggingFace for GGUF models..."}
             className="w-full rounded-lg border border-themed bg-tertiary px-3 py-2 text-sm mb-3 focus:border-brand-500 focus:outline-none"
           />
@@ -829,39 +905,122 @@ function ModelBrowser() {
             <p className="text-xs text-secondary text-center py-2">Searching...</p>
           )}
 
-          <div className="grid grid-cols-1 gap-2 max-h-80 overflow-y-auto lg:grid-cols-2">
+          {/* Pull progress bar */}
+          {pullQueue.length > 0 && (
+            <div className="mb-3 space-y-1.5">
+              {pullQueue.map((item, i) => (
+                <div key={`${item.name}-${i}`} className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] flex-shrink-0 truncate max-w-[200px]">{item.name}</span>
+                  <div className="flex-1">
+                    {item.percent !== null && item.status !== "success" && item.status !== "error" && (
+                      <div className="h-1 rounded-full bg-tertiary overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-brand-500 transition-all duration-300"
+                          style={{ width: `${item.percent}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <span className={`text-[10px] ${
+                    item.status === "success" ? "text-emerald-400" :
+                    item.status === "error" ? "text-red-400" :
+                    item.status === "queued" ? "text-zinc-400" :
+                    "text-brand-400"
+                  }`}>
+                    {item.status === "success" ? "Done" :
+                     item.status === "error" ? (item.error || "Error") :
+                     item.status === "queued" ? "Queued" :
+                     item.percent !== null ? `${item.percent}%` : item.status}
+                  </span>
+                  {(item.status === "success" || item.status === "error") && (
+                    <button
+                      onClick={() => setPullQueue(prev => prev.filter((_, j) => j !== i))}
+                      className="text-xs text-secondary hover:text-primary"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="space-y-1.5 max-h-96 overflow-y-auto">
             {filtered.map(m => {
               const fits = fitsInRam(m);
+              const isSelected = selectedModel === m.name;
               return (
                 <div
                   key={`${m.source || "ollama"}-${m.name}`}
-                  className={`flex items-start justify-between p-2 rounded-lg bg-tertiary ${
+                  className={`rounded-lg bg-tertiary transition-colors ${
                     !fits ? "opacity-40" : ""
-                  }`}
+                  } ${isSelected ? "ring-1 ring-brand-500" : ""}`}
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="font-mono text-xs font-medium truncate">{m.name}</p>
-                      {m.ram_estimate_gb && (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${
-                          fits ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"
-                        }`}>
-                          ~{m.ram_estimate_gb.toFixed(1)} GB
-                        </span>
+                  {/* Clickable header */}
+                  <div
+                    className="flex items-start justify-between p-2 cursor-pointer hover:bg-hover rounded-lg"
+                    onClick={() => setSelectedModel(isSelected ? null : m.name)}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <p className="font-mono text-xs font-medium truncate">{m.name}</p>
+                        {m.ram_estimate_gb && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap ${
+                            fits ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"
+                          }`}>
+                            ~{m.ram_estimate_gb.toFixed(1)} GB
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-secondary mt-0.5 line-clamp-2">{m.description}</p>
+                      <div className="flex items-center gap-2 mt-1 text-[10px] text-secondary">
+                        <span>Sizes: {m.sizes}</span>
+                        {m.pulls && <span>· {m.pulls}</span>}
+                        {m.downloads != null && <span>· {formatNumber(m.downloads)} downloads</span>}
+                        {m.likes != null && m.likes > 0 && <span>· {formatNumber(m.likes)} likes</span>}
+                        {m.updated && <span>· {m.updated}</span>}
+                      </div>
+                      {!fits && (
+                        <p className="text-[10px] text-red-400 mt-0.5">Exceeds system RAM</p>
                       )}
                     </div>
-                    <p className="text-xs text-secondary mt-0.5 line-clamp-2">{m.description}</p>
-                    <div className="flex items-center gap-2 mt-1 text-[10px] text-secondary">
-                      <span>Sizes: {m.sizes}</span>
-                      {m.pulls && <span>· {m.pulls}</span>}
-                      {m.downloads != null && <span>· {formatNumber(m.downloads)} downloads</span>}
-                      {m.likes != null && m.likes > 0 && <span>· {formatNumber(m.likes)} likes</span>}
-                      {m.updated && <span>· {m.updated}</span>}
-                    </div>
-                    {!fits && (
-                      <p className="text-[10px] text-red-400 mt-0.5">Exceeds system RAM</p>
-                    )}
+                    <span className="text-xs text-secondary ml-2 mt-1">{isSelected ? "▲" : "▼"}</span>
                   </div>
+
+                  {/* Expanded: tags/sizes + pull buttons */}
+                  {isSelected && (
+                    <div className="px-2 pb-2 pt-1 border-t border-themed">
+                      {loadingTags ? (
+                        <p className="text-xs text-secondary py-1">Loading sizes...</p>
+                      ) : modelTags.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5 mt-1">
+                          {modelTags.map(tag => (
+                            <button
+                              key={tag}
+                              onClick={() => startPull(m.name, tag)}
+                              className="px-2 py-1 text-[11px] rounded-md bg-surface border border-themed text-secondary hover:text-primary hover:border-brand-500 transition-colors"
+                              title={`Pull ${m.name}:${tag}`}
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2 mt-1">
+                          <p className="text-xs text-secondary">No tags found</p>
+                          <button
+                            onClick={() => startPull(m.name)}
+                            className="px-2 py-1 text-[11px] rounded-md bg-brand-600/20 text-brand-300 border border-brand-500/30 hover:bg-brand-600/30 transition-colors"
+                          >
+                            Pull latest
+                          </button>
+                        </div>
+                      )}
+                      {modelTags.length > 0 && (
+                        <p className="text-[10px] text-secondary mt-1.5">Click a size/quantization to pull</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
