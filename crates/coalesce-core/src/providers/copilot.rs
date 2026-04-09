@@ -2,17 +2,20 @@ use super::{ByteStream, Provider};
 use crate::error::{CoalesceError, Result};
 use crate::types::{ChatRequest, ModelCapabilities, ModelInfo, QualityTier, derive_canonical_family};
 use async_trait::async_trait;
+use bytes::Bytes;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const GITHUB_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const COPILOT_CHAT_URL: &str = "https://api.githubcopilot.com/chat/completions";
+const COPILOT_RESPONSES_URL: &str = "https://api.githubcopilot.com/responses";
 const COPILOT_MODELS_URL: &str = "https://api.githubcopilot.com/models";
 
 /// Token refresh margin — refresh 2 minutes before expiry
@@ -22,6 +25,9 @@ pub struct CopilotProvider {
     client: Client,
     token_state: Arc<RwLock<TokenState>>,
     provider_name: String,
+    /// Models that only support the `/responses` endpoint (not `/chat/completions`).
+    /// Populated by `list_models()` from the Copilot API's `supported_endpoints` field.
+    responses_only_models: Arc<RwLock<HashSet<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +66,7 @@ impl CopilotProvider {
                 copilot_expires_at: 0,
             })),
             provider_name: name,
+            responses_only_models: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -69,6 +76,7 @@ impl CopilotProvider {
             client: Client::new(),
             token_state: Arc::new(RwLock::new(TokenState::default())),
             provider_name: "copilot".to_string(),
+            responses_only_models: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -243,6 +251,261 @@ impl CopilotProvider {
         headers
     }
 
+    /// Check if a model requires the Responses API instead of chat completions.
+    async fn needs_responses_api(&self, model: &str) -> bool {
+        let cache = self.responses_only_models.read().await;
+        let result = cache.contains(model);
+        debug!(model = %model, cached_count = cache.len(), needs_responses = result, "Copilot: responses API check");
+        result
+    }
+
+    /// Convert a ChatRequest into an OpenAI Responses API request body.
+    fn build_responses_request(request: &ChatRequest) -> serde_json::Value {
+        // The Responses API accepts `input` as an array of message objects
+        // with the same {role, content} shape as chat completions.
+        let mut body = serde_json::json!({
+            "model": request.model,
+            "stream": request.stream,
+        });
+
+        // Convert messages → input items
+        let input: Vec<serde_json::Value> = request.messages.iter().map(|m| {
+            let mut item = serde_json::json!({
+                "role": m.role,
+            });
+            if let Some(ref content) = m.content {
+                item["content"] = serde_json::to_value(content).unwrap_or_default();
+            }
+            if let Some(ref tool_calls) = m.tool_calls {
+                item["tool_calls"] = serde_json::to_value(tool_calls).unwrap_or_default();
+            }
+            if let Some(ref tool_call_id) = m.tool_call_id {
+                item["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
+            }
+            item
+        }).collect();
+        body["input"] = serde_json::Value::Array(input);
+
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::json!(temp);
+        }
+        if let Some(max) = request.max_tokens {
+            body["max_output_tokens"] = serde_json::json!(max);
+        }
+        if let Some(ref tools) = request.tools {
+            body["tools"] = serde_json::to_value(tools).unwrap_or_default();
+        }
+        if let Some(ref tool_choice) = request.tool_choice {
+            body["tool_choice"] = tool_choice.clone();
+        }
+
+        // Forward extra fields (reasoning_effort, top_p, etc.) that the
+        // Responses API may accept even if the Copilot models endpoint
+        // doesn't advertise them in `capabilities.supports`.
+        for (k, v) in &request.extra {
+            body[k] = v.clone();
+        }
+
+        body
+    }
+
+    /// Convert a Responses API JSON result into chat-completions shape so the
+    /// rest of the pipeline (economics, logging, Rosetta) is unaware.
+    fn responses_to_chat_completion(resp: serde_json::Value) -> serde_json::Value {
+        let mut content_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(output) = resp.get("output").and_then(|v| v.as_array()) {
+            for item in output {
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match item_type {
+                    "message" => {
+                        if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                            for part in content {
+                                let part_type = part.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                if part_type == "output_text" {
+                                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                                        content_parts.push(text.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "function_call" => {
+                        tool_calls.push(serde_json::json!({
+                            "id": item.get("call_id").unwrap_or(&serde_json::Value::Null),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name").unwrap_or(&serde_json::Value::Null),
+                                "arguments": item.get("arguments").unwrap_or(&serde_json::Value::Null),
+                            }
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let full_content = content_parts.join("");
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": if full_content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(full_content) },
+        });
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
+
+        // Map usage fields
+        let usage = resp.get("usage").map(|u| {
+            serde_json::json!({
+                "prompt_tokens": u.get("input_tokens").unwrap_or(&serde_json::json!(0)),
+                "completion_tokens": u.get("output_tokens").unwrap_or(&serde_json::json!(0)),
+                "total_tokens": u.get("total_tokens").unwrap_or(&serde_json::json!(0)),
+            })
+        });
+
+        let finish_reason = resp.get("status")
+            .and_then(|s| s.as_str())
+            .map(|s| match s {
+                "completed" => "stop",
+                "incomplete" => "length",
+                _ => "stop",
+            })
+            .unwrap_or("stop");
+
+        let mut result = serde_json::json!({
+            "id": resp.get("id").unwrap_or(&serde_json::Value::Null),
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }],
+        });
+        if let Some(u) = usage {
+            result["usage"] = u;
+        }
+        result
+    }
+
+    /// Transform a Responses API SSE byte stream into chat-completions SSE format.
+    /// The Responses API emits typed events (response.output_text.delta, etc.)
+    /// that we rewrite into OpenAI-compat `data: {choices:[{delta:{...}}]}` frames.
+    fn transform_responses_stream(byte_stream: ByteStream) -> ByteStream {
+        use futures::StreamExt;
+
+        let stream = async_stream::stream! {
+            let mut inner = byte_stream;
+            let mut buffer = String::new();
+            let mut tool_call_idx: i32 = -1;
+
+            while let Some(chunk_result) = inner.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        yield Err(e);
+                        continue;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                let lines: Vec<String> = buffer.split('\n').map(String::from).collect();
+                buffer = lines.last().cloned().unwrap_or_default();
+
+                let mut current_event_type: Option<String> = None;
+
+                for line in &lines[..lines.len().saturating_sub(1)] {
+                    let line = line.trim();
+
+                    if line.starts_with("event:") {
+                        current_event_type = Some(line[6..].trim().to_string());
+                        continue;
+                    }
+
+                    if !line.starts_with("data:") {
+                        if line.is_empty() {
+                            current_event_type = None;
+                        }
+                        continue;
+                    }
+
+                    let data = line[5..].trim();
+                    let event_type = current_event_type.take().unwrap_or_default();
+
+                    let parsed: serde_json::Value = match serde_json::from_str(data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    let sse_line = match event_type.as_str() {
+                        "response.output_text.delta" => {
+                            let text = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                            format!("data: {}\n\n", serde_json::json!({
+                                "choices": [{"index": 0, "delta": {"content": text}}]
+                            }))
+                        }
+                        "response.function_call_arguments.delta" => {
+                            let args = parsed.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                            let name = parsed.get("name").and_then(|v| v.as_str());
+                            let call_id = parsed.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+
+                            // First delta for a new function call includes name + id
+                            if name.is_some() || args.starts_with('{') {
+                                tool_call_idx += 1;
+                            }
+                            let idx = tool_call_idx.max(0) as usize;
+
+                            let mut tc = serde_json::json!({
+                                "index": idx,
+                                "function": { "arguments": args }
+                            });
+                            if let Some(n) = name {
+                                tc["id"] = serde_json::Value::String(call_id.to_string());
+                                tc["type"] = serde_json::Value::String("function".to_string());
+                                tc["function"]["name"] = serde_json::Value::String(n.to_string());
+                            }
+
+                            format!("data: {}\n\n", serde_json::json!({
+                                "choices": [{"index": 0, "delta": {"tool_calls": [tc]}}]
+                            }))
+                        }
+                        "response.completed" => {
+                            // Extract usage and finish reason from the completed event
+                            let usage = parsed.get("response").and_then(|r| r.get("usage"));
+                            let status = parsed.get("response")
+                                .and_then(|r| r.get("status"))
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("completed");
+                            let finish = match status {
+                                "completed" => "stop",
+                                "incomplete" => "length",
+                                _ => "stop",
+                            };
+
+                            let mut chunk = serde_json::json!({
+                                "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]
+                            });
+                            if let Some(u) = usage {
+                                chunk["usage"] = serde_json::json!({
+                                    "prompt_tokens": u.get("input_tokens").unwrap_or(&serde_json::json!(0)),
+                                    "completion_tokens": u.get("output_tokens").unwrap_or(&serde_json::json!(0)),
+                                    "total_tokens": u.get("total_tokens").unwrap_or(&serde_json::json!(0)),
+                                });
+                            }
+                            format!("data: {}\n\ndata: [DONE]\n\n", chunk)
+                        }
+                        // Silently skip all other event types (response.created,
+                        // response.in_progress, content_part events, etc.)
+                        _ => continue,
+                    };
+
+                    yield Ok(Bytes::from(sse_line));
+                }
+            }
+        };
+        Box::pin(stream)
+    }
+
     async fn fetch_models_dynamic(&self, token: &str, prov: &str) -> Result<Vec<ModelInfo>> {
         let resp = self
             .client
@@ -339,6 +602,61 @@ impl CopilotProvider {
                 capabilities: None,
             },
         ]
+    }
+
+    /// Non-streaming chat via the Responses API, result converted to chat-completions format.
+    async fn chat_via_responses(&self, request: &ChatRequest, token: &str) -> Result<serde_json::Value> {
+        let mut body = Self::build_responses_request(request);
+        body["stream"] = serde_json::Value::Bool(false);
+
+        info!(model = %request.model, "Copilot: routing to /responses endpoint");
+        let resp = self
+            .client
+            .post(COPILOT_RESPONSES_URL)
+            .headers(self.copilot_headers(token))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CoalesceError::Provider {
+                provider: self.provider_name.clone(),
+                message: format!("Responses API failed ({}): {}", status, body),
+                status: Some(status.as_u16()),
+            });
+        }
+
+        let json: serde_json::Value = resp.json().await?;
+        Ok(Self::responses_to_chat_completion(json))
+    }
+
+    /// Streaming chat via the Responses API, SSE rewritten to chat-completions format.
+    async fn stream_via_responses(&self, request: &ChatRequest, token: &str) -> Result<ByteStream> {
+        let mut body = Self::build_responses_request(request);
+        body["stream"] = serde_json::Value::Bool(true);
+
+        info!(model = %request.model, "Copilot: streaming via /responses endpoint");
+        let resp = self
+            .client
+            .post(COPILOT_RESPONSES_URL)
+            .headers(self.copilot_headers(token))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CoalesceError::Provider {
+                provider: self.provider_name.clone(),
+                message: format!("Responses API stream failed ({}): {}", status, body),
+                status: Some(status.as_u16()),
+            });
+        }
+
+        Ok(Self::transform_responses_stream(Box::pin(resp.bytes_stream())))
     }
 }
 
@@ -556,6 +874,23 @@ impl Provider for CopilotProvider {
             if let Ok(models) = self.fetch_models_dynamic(&token, prov).await {
                 if !models.is_empty() {
                     debug!("Copilot: discovered {} models dynamically", models.len());
+
+                    // Populate the responses-only cache from model capabilities.
+                    let mut resp_only = self.responses_only_models.write().await;
+                    resp_only.clear();
+                    for m in &models {
+                        if let Some(ref caps) = m.capabilities {
+                            if let Some(ref eps) = caps.supported_endpoints {
+                                let has_chat = eps.iter().any(|e| e.contains("chat"));
+                                let has_responses = eps.iter().any(|e| e.contains("responses"));
+                                if has_responses && !has_chat {
+                                    debug!(model = %m.id, "Copilot: model requires /responses API");
+                                    resp_only.insert(m.id.clone());
+                                }
+                            }
+                        }
+                    }
+
                     return Ok(models);
                 }
             }
@@ -567,6 +902,10 @@ impl Provider for CopilotProvider {
 
     async fn chat(&self, request: &ChatRequest) -> Result<serde_json::Value> {
         let token = self.get_copilot_token().await?;
+
+        if self.needs_responses_api(&request.model).await {
+            return self.chat_via_responses(request, &token).await;
+        }
 
         let resp = self
             .client
@@ -592,6 +931,10 @@ impl Provider for CopilotProvider {
 
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ByteStream> {
         let token = self.get_copilot_token().await?;
+
+        if self.needs_responses_api(&request.model).await {
+            return self.stream_via_responses(request, &token).await;
+        }
 
         let mut req = request.clone();
         req.stream = true;
@@ -658,6 +1001,113 @@ mod tests {
         let provider = CopilotProvider::with_token("ghu_test123".into());
         let state = provider.token_state.try_read().unwrap();
         assert_eq!(state.github_token.as_deref(), Some("ghu_test123"));
+    }
+
+    #[test]
+    fn test_responses_to_chat_completion() {
+        let responses_json = serde_json::json!({
+            "id": "resp_abc123",
+            "object": "response",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "output_text", "text": "Hello, world!" }
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+        let result = CopilotProvider::responses_to_chat_completion(responses_json);
+
+        assert_eq!(result["object"], "chat.completion");
+        assert_eq!(result["choices"][0]["message"]["content"], "Hello, world!");
+        assert_eq!(result["choices"][0]["finish_reason"], "stop");
+        assert_eq!(result["usage"]["prompt_tokens"], 10);
+        assert_eq!(result["usage"]["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn test_responses_to_chat_completion_with_tool_calls() {
+        let responses_json = serde_json::json!({
+            "id": "resp_abc",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": "{\"city\":\"Tokyo\"}"
+                }
+            ],
+            "usage": { "input_tokens": 8, "output_tokens": 12, "total_tokens": 20 }
+        });
+        let result = CopilotProvider::responses_to_chat_completion(responses_json);
+
+        let tc = &result["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["function"]["name"], "get_weather");
+        assert_eq!(tc["function"]["arguments"], "{\"city\":\"Tokyo\"}");
+    }
+
+    #[test]
+    fn test_build_responses_request() {
+        use crate::types::{Message, MessageContent};
+        let req = ChatRequest {
+            model: "goldeneye-free-auto".into(),
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: Some(MessageContent::Text("Hi".into())),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    extra: Default::default(),
+                },
+            ],
+            stream: false,
+            max_tokens: Some(1024),
+            temperature: Some(0.7),
+            top_p: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            extra: Default::default(),
+        };
+        let body = CopilotProvider::build_responses_request(&req);
+
+        assert_eq!(body["model"], "goldeneye-free-auto");
+        assert_eq!(body["max_output_tokens"], 1024);
+        assert_eq!(body["temperature"], 0.7);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_needs_responses_api() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let provider = CopilotProvider::new();
+            // Not in cache initially
+            assert!(!provider.needs_responses_api("goldeneye-free-auto").await);
+            // Add to cache
+            provider.responses_only_models.write().await.insert("goldeneye-free-auto".into());
+            assert!(provider.needs_responses_api("goldeneye-free-auto").await);
+            // Other models unaffected
+            assert!(!provider.needs_responses_api("gpt-4o").await);
+        });
     }
 
     #[test]

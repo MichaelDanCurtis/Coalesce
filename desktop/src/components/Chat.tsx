@@ -3,7 +3,8 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import RoutingViz, { RoutingPath } from "./RoutingViz";
 import { api } from "../api/client";
-import { parseBlocks, BlockRenderer } from "./chat/blocks";
+import { parseBlocks, BlockRenderer, canonicalToLocalBlocks } from "./chat/blocks";
+import type { CanonicalBlock, CanonicalStreamDelta } from "../types/rosetta";
 import { parseSlash, SLASH_COMMANDS } from "./chat/slashCommands";
 import {
   loadTerminalTheme,
@@ -21,6 +22,10 @@ interface ChatMessage {
   routing?: RoutingPath;
   attachments?: Attachment[];
   rated?: "up" | "down";
+  // Ticket B4: canonical Rosetta blocks accumulated from per-chunk
+  // `x_coalesce` SSE payloads. When non-empty, the renderer prefers
+  // these over regex-scraping `content`.
+  structuredBlocks?: CanonicalBlock[];
 }
 
 interface Attachment {
@@ -229,6 +234,7 @@ export default function Chat() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedProvider, setSelectedProvider] = useState<string>("any");
   const [selectedModel, setSelectedModel] = useState<string>("auto");
+  const [reasoningEffort, setReasoningEffort] = useState<string>("default");
   const [selectedRouting, setSelectedRouting] = useState<RoutingPath | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState("");
@@ -705,6 +711,7 @@ export default function Chat() {
             model: selectedModel || conv?.model || "auto",
             messages: apiMessages,
             stream: true,
+            ...(reasoningEffort !== "default" ? { reasoning_effort: reasoningEffort } : {}),
           }),
           signal: controller.signal,
         });
@@ -768,6 +775,9 @@ export default function Chat() {
         let finishReason: string | undefined;
         let costUsd = 0;
         let routingScore = 0;
+        // Ticket B4: accumulator for canonical Rosetta blocks
+        // emitted per-chunk under chunk.x_coalesce.
+        const structuredBlocks: CanonicalBlock[] = [];
 
         while (reader) {
           const { done, value } = await reader.read();
@@ -809,16 +819,26 @@ export default function Chat() {
                 finishReason = chunk.choices[0].finish_reason;
               }
 
-              const delta = chunk.choices?.[0]?.delta;
-              if (delta?.content) {
-                fullContent += delta.content;
+              // Ticket B4: drain per-chunk canonical Rosetta blocks.
+              // The proxy attaches these as a sibling key on each
+              // OpenAI-compat delta frame (see sse_forwarder.rs).
+              const rosetta = chunk.x_coalesce as CanonicalStreamDelta | undefined;
+              if (rosetta?.blocks && rosetta.blocks.length > 0) {
+                for (const b of rosetta.blocks) structuredBlocks.push(b);
+              }
 
-                // Update message content
+              const delta = chunk.choices?.[0]?.delta;
+              if (delta?.content || (rosetta?.blocks && rosetta.blocks.length > 0)) {
+                if (delta?.content) fullContent += delta.content;
+
+                // Snapshot blocks so the render side can swap in a
+                // canonical-first path without waiting for stream end.
+                const snapshot = structuredBlocks.slice();
                 updateConversation(convId!, (c) => ({
                   ...c,
                   messages: c.messages.map((m) =>
                     m.id === assistantMsg.id
-                      ? { ...m, content: fullContent }
+                      ? { ...m, content: fullContent, structuredBlocks: snapshot }
                       : m
                   ),
                 }));
@@ -851,7 +871,13 @@ export default function Chat() {
           ...c,
           messages: c.messages.map((m) =>
             m.id === assistantMsg.id
-              ? { ...m, content: fullContent, routing, timestamp: Date.now() }
+              ? {
+                  ...m,
+                  content: fullContent,
+                  routing,
+                  timestamp: Date.now(),
+                  structuredBlocks: structuredBlocks.length > 0 ? structuredBlocks.slice() : undefined,
+                }
               : m
           ),
           updatedAt: Date.now(),
@@ -1253,6 +1279,19 @@ export default function Chat() {
             ))}
           </select>
 
+          {/* Reasoning effort selector */}
+          <select
+            value={reasoningEffort}
+            onChange={(e) => setReasoningEffort(e.target.value)}
+            className="px-2 py-1.5 text-xs rounded-md bg-surface-alt border border-themed text-primary focus:outline-none focus:ring-1 focus:ring-brand-500"
+            title="Reasoning effort level"
+          >
+            <option value="default">effort: default</option>
+            <option value="low">effort: low</option>
+            <option value="medium">effort: medium</option>
+            <option value="high">effort: high</option>
+          </select>
+
           <button
             onClick={() => {
               setAbMode((v) => !v);
@@ -1427,7 +1466,11 @@ export default function Chat() {
                             {m.role === "user" ? "user@coalesce:~$" : "assistant >"}
                           </div>
                           <BlockRenderer
-                            blocks={parseBlocks(m.content || "")}
+                            blocks={
+                              m.structuredBlocks && m.structuredBlocks.length > 0
+                                ? canonicalToLocalBlocks(m.structuredBlocks)
+                                : parseBlocks(m.content || "")
+                            }
                             mdComponents={mdComponents}
                             streaming={streaming && activeId === cid}
                           />
@@ -1505,7 +1548,11 @@ export default function Chat() {
                   </div>
                 ) : (
                   <BlockRenderer
-                    blocks={parseBlocks(msg.content || (streaming ? "▍" : ""))}
+                    blocks={
+                      msg.structuredBlocks && msg.structuredBlocks.length > 0
+                        ? canonicalToLocalBlocks(msg.structuredBlocks)
+                        : parseBlocks(msg.content || (streaming ? "▍" : ""))
+                    }
                     mdComponents={mdComponents}
                     streaming={streaming}
                     onChoose={
