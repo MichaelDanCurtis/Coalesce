@@ -196,11 +196,12 @@ export const api = {
     return httpPost(`/api/v1/providers/ollama/models/${safeName}/toggle`, { enabled });
   },
 
-  async ollamaPull(model: string): Promise<Response> {
+  async ollamaPull(model: string, signal?: AbortSignal): Promise<Response> {
     return fetch(`${PROXY_BASE}/api/v1/ollama/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model }),
+      signal,
     });
   },
 
@@ -228,7 +229,11 @@ export const api = {
   },
 
   async ollamaStatus() {
-    return httpGet<{ running: boolean; version: string; gpu: { gpus: Array<Record<string, unknown>>; acceleration: string } }>("/api/v1/ollama/status");
+    return httpGet<{ running: boolean; version: string; gpu: { gpus: Array<Record<string, unknown>>; acceleration: string }; latest_version?: string; update_available?: boolean }>("/api/v1/ollama/status");
+  },
+
+  async ollamaUpgrade() {
+    return httpPost<{ status: string; error?: string }>("/api/v1/ollama/upgrade", {});
   },
 
   async ollamaLibrarySearch(q?: string) {
@@ -392,39 +397,6 @@ export const api = {
 
   exportCostsCsvUrl(days?: number) {
     return `${PROXY_BASE}/api/v1/stats/export/costs/csv?days=${days ?? 30}`;
-  },
-
-  // --- Audio ---
-  /// POST text to /v1/audio/speech and return an audio Blob.
-  async synthesizeSpeech(text: string, voice = "alloy"): Promise<Blob> {
-    const res = await fetch(`${PROXY_BASE}/v1/audio/speech`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: "tts-1", voice, input: text }),
-    });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => res.statusText);
-      throw new Error(`tts failed: ${res.status} ${msg}`);
-    }
-    return await res.blob();
-  },
-
-  /// POST an audio blob to /v1/audio/transcriptions and return the text.
-  /// Uses multipart/form-data per the OpenAI-compatible endpoint.
-  async transcribeAudio(blob: Blob, filename = "recording.webm"): Promise<string> {
-    const form = new FormData();
-    form.append("file", blob, filename);
-    form.append("model", "whisper-1");
-    const res = await fetch(`${PROXY_BASE}/v1/audio/transcriptions`, {
-      method: "POST",
-      body: form,
-    });
-    if (!res.ok) {
-      const msg = await res.text().catch(() => res.statusText);
-      throw new Error(`transcription failed: ${res.status} ${msg}`);
-    }
-    const data = (await res.json()) as { text?: string };
-    return data.text ?? "";
   },
 
   // --- Quality Feedback ---

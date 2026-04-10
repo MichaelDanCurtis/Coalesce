@@ -280,13 +280,6 @@ export default function Chat() {
   const [abModelB, setAbModelB] = useState<string>("auto");
   const [abViewIds, setAbViewIds] = useState<[string, string] | null>(null);
 
-  // ─── 19.4 rich input state ────────────────────────────────
-  const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaChunksRef = useRef<Blob[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-
   // Derived
   const active = useMemo(
     () => conversations.find((c) => c.id === activeId) || null,
@@ -1061,55 +1054,6 @@ export default function Chat() {
     }
   }, [input, active, regenerate, sendMessage, updateConversation, forkFrom, abMode, sendAB]);
 
-  // ─── 19.4 Mic / audio transcription ─────────────────────
-
-  const stopRecording = useCallback(() => {
-    const rec = mediaRecorderRef.current;
-    if (rec && rec.state !== "inactive") rec.stop();
-    const stream = mediaStreamRef.current;
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-    setRecording(false);
-  }, []);
-
-  const toggleMic = useCallback(async () => {
-    if (recording) {
-      stopRecording();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-      const rec = new MediaRecorder(stream);
-      mediaChunksRef.current = [];
-      rec.ondataavailable = (e) => {
-        if (e.data.size > 0) mediaChunksRef.current.push(e.data);
-      };
-      rec.onstop = async () => {
-        const blob = new Blob(mediaChunksRef.current, { type: "audio/webm" });
-        mediaChunksRef.current = [];
-        if (blob.size === 0) return;
-        setTranscribing(true);
-        try {
-          const text = await api.transcribeAudio(blob);
-          if (text) {
-            setInput((prev) => (prev ? prev + " " + text : text));
-          }
-        } catch (err) {
-          console.error("transcription failed", err);
-        } finally {
-          setTranscribing(false);
-        }
-      };
-      mediaRecorderRef.current = rec;
-      rec.start();
-      setRecording(true);
-    } catch (err) {
-      console.error("mic access denied", err);
-      setRecording(false);
-    }
-  }, [recording, stopRecording]);
-
   // ─── Key handler ─────────────────────────────────────────
 
   const handleKeyDown = useCallback(
@@ -1682,23 +1626,6 @@ export default function Chat() {
                             Continue ⏵
                           </button>
                         )}
-                        <button
-                          onClick={async () => {
-                            try {
-                              const blob = await api.synthesizeSpeech(msg.content);
-                              const url = URL.createObjectURL(blob);
-                              const audio = new Audio(url);
-                              audio.onended = () => URL.revokeObjectURL(url);
-                              await audio.play();
-                            } catch (err) {
-                              console.error("tts failed", err);
-                            }
-                          }}
-                          className="text-[10px] text-secondary hover:text-primary transition-colors"
-                          title="Play with TTS"
-                        >
-                          ♪
-                        </button>
                         {msg.routing && (
                           <>
                             <span className="text-secondary/30">|</span>
@@ -1794,25 +1721,6 @@ export default function Chat() {
               📎
             </button>
 
-            <button
-              onClick={toggleMic}
-              disabled={transcribing}
-              className={`px-2 py-2 text-sm rounded-md border border-themed transition-colors ${
-                recording
-                  ? "bg-red-600/80 text-white animate-pulse"
-                  : "bg-surface-alt text-secondary hover:text-primary"
-              } disabled:opacity-40`}
-              title={
-                recording
-                  ? "Stop recording"
-                  : transcribing
-                  ? "Transcribing…"
-                  : "Record voice message"
-              }
-            >
-              {transcribing ? "⏳" : recording ? "⏹" : "🎤"}
-            </button>
-
             <textarea
               ref={inputRef}
               value={input}
@@ -1905,8 +1813,6 @@ export default function Chat() {
                 <ul className="space-y-1 opacity-80">
                   <li>⑂ Fork — branch conversation at any turn</li>
                   <li>A/B — compare two models side by side</li>
-                  <li>🎤 — voice input via Whisper</li>
-                  <li>♪ — TTS playback of assistant turns</li>
                 </ul>
               </div>
             </div>

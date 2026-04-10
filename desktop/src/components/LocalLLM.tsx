@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { api } from "../api/client";
 import { useTranslation } from "../i18n";
 
@@ -66,7 +66,6 @@ export default function LocalLLM() {
       <GpuInfoPanel />
       <ResourceMonitor />
       <RunningModels />
-      <PullModel />
       <ModelBrowser />
       <InstalledModels />
       <ImportGGUF />
@@ -80,13 +79,19 @@ function OllamaStatusBar() {
   const { t } = useTranslation();
   const [running, setRunning] = useState<boolean | null>(null);
   const [version, setVersion] = useState("");
+  const [latestVersion, setLatestVersion] = useState("");
+  const [updateAvailable, setUpdateAvailable] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [upgrading, setUpgrading] = useState(false);
 
   const checkStatus = useCallback(async () => {
     try {
       const data = await api.ollamaStatus();
       setRunning(data.running);
       setVersion(data.version || "");
+      if (data.latest_version) setLatestVersion(data.latest_version);
+      if (data.update_available) setUpdateAvailable(true);
+      else setUpdateAvailable(false);
     } catch {
       setRunning(false);
     }
@@ -122,6 +127,18 @@ function OllamaStatusBar() {
     checkStatus();
   };
 
+  const upgrade = async () => {
+    setUpgrading(true);
+    try {
+      const result = await api.ollamaUpgrade();
+      if (result.status === "upgraded") {
+        setUpdateAvailable(false);
+      }
+    } catch {}
+    setUpgrading(false);
+    checkStatus();
+  };
+
   return (
     <div className="card flex items-center justify-between">
       <div className="flex items-center gap-3">
@@ -129,10 +146,23 @@ function OllamaStatusBar() {
           running === null ? "bg-zinc-500 animate-pulse" :
           running ? "bg-emerald-500" : "bg-red-500"
         }`} />
-        <div>
+        <div className="flex items-center gap-2">
           <span className="font-medium">Ollama</span>
-          {running && version && <span className="text-xs text-secondary ml-2">v{version}</span>}
-          <span className="text-xs text-secondary ml-2">
+          {running && version && (
+            updateAvailable ? (
+              <button
+                onClick={upgrade}
+                disabled={upgrading}
+                className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-400 hover:bg-amber-500/25 transition-colors disabled:opacity-50 cursor-pointer"
+                title={`Update Ollama: v${version} → v${latestVersion}`}
+              >
+                {upgrading ? "Upgrading..." : `v${version} → v${latestVersion} ⬆`}
+              </button>
+            ) : (
+              <span className="text-xs text-secondary">v{version}</span>
+            )
+          )}
+          <span className="text-xs text-secondary">
             {running === null ? "Checking..." : running ? t("localllm.status_running") : t("localllm.status_stopped")}
           </span>
         </div>
@@ -509,189 +539,6 @@ function RunningModels() {
   );
 }
 
-/* ─── Pull New Model (with Quantization Picker) ─── */
-
-function PullModel() {
-  const { t } = useTranslation();
-  const [modelName, setModelName] = useState("");
-  const [tags, setTags] = useState<string[]>([]);
-  const [selectedTag, setSelectedTag] = useState("");
-  const [loadingTags, setLoadingTags] = useState(false);
-
-  // Pull queue
-  const [queue, setQueue] = useState<Array<{ name: string; status: string; percent: number | null; error?: string }>>([]);
-  const [pulling, setPulling] = useState(false);
-
-  // When model name changes, fetch available tags
-  useEffect(() => {
-    if (!modelName.trim() || modelName.includes(":")) {
-      setTags([]);
-      return;
-    }
-    const timeout = setTimeout(async () => {
-      setLoadingTags(true);
-      try {
-        const data = await api.ollamaLibraryTags(modelName.trim());
-        const tagNames = (data.tags || []).map((t: unknown) => {
-          if (typeof t === "string") return t;
-          if (typeof t === "object" && t !== null && "name" in t) return String((t as Record<string, unknown>).name);
-          return "";
-        }).filter(Boolean) as string[];
-        setTags(tagNames.slice(0, 20));
-      } catch {
-        setTags([]);
-      }
-      setLoadingTags(false);
-    }, 500);
-    return () => clearTimeout(timeout);
-  }, [modelName]);
-
-  const addToQueue = () => {
-    const fullName = selectedTag ? `${modelName.trim()}:${selectedTag}` : modelName.trim();
-    if (!fullName) return;
-    setQueue(prev => [...prev, { name: fullName, status: "queued", percent: null }]);
-    setModelName("");
-    setSelectedTag("");
-    setTags([]);
-  };
-
-  // Process queue
-  useEffect(() => {
-    if (pulling) return;
-    const next = queue.findIndex(q => q.status === "queued");
-    if (next === -1) return;
-
-    setPulling(true);
-    const model = queue[next].name;
-    setQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "pulling" } : q));
-
-    (async () => {
-      try {
-        const resp = await api.ollamaPull(model);
-        if (!resp.ok) {
-          setQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: `HTTP ${resp.status}` } : q));
-          setPulling(false);
-          return;
-        }
-
-        const reader = resp.body?.getReader();
-        if (!reader) {
-          setQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: "No stream" } : q));
-          setPulling(false);
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) {
-            const trimmed = line.replace(/^data:\s*/, "").trim();
-            if (!trimmed) continue;
-            try {
-              const parsed = JSON.parse(trimmed);
-              const percent = parsed.total && parsed.completed
-                ? Math.round((parsed.completed / parsed.total) * 100) : null;
-              setQueue(prev => prev.map((q, i) =>
-                i === next ? { ...q, status: parsed.status || "pulling", percent } : q
-              ));
-            } catch {}
-          }
-        }
-        setQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "success", percent: 100 } : q));
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : "Failed";
-        setQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: msg } : q));
-      }
-      setPulling(false);
-    })();
-  }, [queue, pulling]);
-
-  return (
-    <div>
-      <h3 className="text-sm font-medium text-secondary mb-3">{t("localllm.pull")}</h3>
-      <div className="card">
-        <div className="flex gap-2 mb-2">
-          <input
-            value={modelName}
-            onChange={e => setModelName(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && addToQueue()}
-            placeholder="e.g. llama3.2, phi4-mini, qwen2.5, deepseek-r1"
-            className="flex-1 rounded-lg border border-themed bg-tertiary px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
-          />
-          {tags.length > 0 && (
-            <select
-              value={selectedTag}
-              onChange={e => setSelectedTag(e.target.value)}
-              className="rounded-lg border border-themed bg-tertiary px-2 py-2 text-sm"
-            >
-              <option value="">latest</option>
-              {tags.map(tag => (
-                <option key={tag} value={tag}>{tag}</option>
-              ))}
-            </select>
-          )}
-          {loadingTags && <span className="text-xs text-secondary self-center">...</span>}
-          <button
-            onClick={addToQueue}
-            disabled={!modelName.trim()}
-            className="btn-primary text-sm px-4"
-          >
-            {t("localllm.pull_btn")}
-          </button>
-        </div>
-
-        <p className="text-xs text-secondary mb-3">{t("localllm.pull_hint")}</p>
-
-        {/* Download Queue */}
-        {queue.length > 0 && (
-          <div className="space-y-2">
-            {queue.map((item, i) => (
-              <div key={`${item.name}-${i}`} className="flex items-center gap-3">
-                <span className="font-mono text-xs flex-shrink-0">{item.name}</span>
-                <div className="flex-1">
-                  {item.percent !== null && item.status !== "success" && item.status !== "error" && (
-                    <div className="h-1.5 rounded-full bg-tertiary overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-brand-500 transition-all duration-300"
-                        style={{ width: `${item.percent}%` }}
-                      />
-                    </div>
-                  )}
-                </div>
-                <span className={`text-xs ${
-                  item.status === "success" ? "text-emerald-400" :
-                  item.status === "error" ? "text-red-400" :
-                  item.status === "queued" ? "text-zinc-400" :
-                  "text-brand-400"
-                }`}>
-                  {item.status === "success" ? "Done" :
-                   item.status === "error" ? item.error :
-                   item.status === "queued" ? "Queued" :
-                   item.percent !== null ? `${item.percent}%` : item.status}
-                </span>
-                {(item.status === "success" || item.status === "error") && (
-                  <button
-                    onClick={() => setQueue(prev => prev.filter((_, j) => j !== i))}
-                    className="text-xs text-secondary hover:text-primary"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 /* ─── Model Browser (Library Search) ─── */
 
 function ModelBrowser() {
@@ -766,6 +613,7 @@ function ModelBrowser() {
   // Pull queue (browser-local)
   const [pullQueue, setPullQueue] = useState<Array<{ name: string; status: string; percent: number | null; error?: string }>>([]);
   const [pulling, setPulling] = useState(false);
+  const pullAbortRef = useRef<AbortController | null>(null);
 
   // Fetch tags when model is selected
   useEffect(() => {
@@ -789,9 +637,11 @@ function ModelBrowser() {
     setPulling(true);
     const model = pullQueue[next].name;
     setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "pulling" } : q));
+    const abort = new AbortController();
+    pullAbortRef.current = abort;
     (async () => {
       try {
-        const resp = await api.ollamaPull(model);
+        const resp = await api.ollamaPull(model, abort.signal);
         if (!resp.ok) {
           setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: `HTTP ${resp.status}` } : q));
           setPulling(false);
@@ -801,6 +651,9 @@ function ModelBrowser() {
         if (!reader) { setPulling(false); return; }
         const decoder = new TextDecoder();
         let buffer = "";
+        let cumulCompleted = 0;
+        let cumulTotal = 0;
+        const seenDigests = new Set<string>();
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -812,22 +665,58 @@ function ModelBrowser() {
             if (!trimmed) continue;
             try {
               const parsed = JSON.parse(trimmed);
-              const percent = parsed.total && parsed.completed
-                ? Math.round((parsed.completed / parsed.total) * 100) : null;
+              // Check for error in stream
+              if (parsed.error) {
+                const errMsg = String(parsed.error).replace(/\n/g, " ").trim();
+                setPullQueue(prev => prev.map((q, i) =>
+                  i === next ? { ...q, status: "error", error: errMsg } : q
+                ));
+                pullAbortRef.current = null;
+                setPulling(false);
+                return;
+              }
+              // Track cumulative progress across all layers
+              if (parsed.digest && parsed.total) {
+                if (!seenDigests.has(parsed.digest)) {
+                  seenDigests.add(parsed.digest);
+                  cumulTotal += parsed.total;
+                }
+                const layerCompleted = parsed.completed ?? 0;
+                cumulCompleted = layerCompleted;
+              }
+              // Map status to friendly label
+              let label = parsed.status || "pulling";
+              if (label === "success") label = "success";
+              else if (label.startsWith("pulling") && parsed.digest) label = "Downloading...";
+              else if (label === "pulling manifest") label = "Resolving...";
+              else if (label.startsWith("verifying")) label = "Verifying...";
+              else if (label.startsWith("writing")) label = "Finalizing...";
+              const percent = cumulTotal > 0
+                ? Math.min(Math.round((cumulCompleted / cumulTotal) * 100), 99) : 0;
               setPullQueue(prev => prev.map((q, i) =>
-                i === next ? { ...q, status: parsed.status || "pulling", percent } : q
+                i === next ? { ...q, status: label, percent } : q
               ));
             } catch {}
           }
         }
         setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "success", percent: 100 } : q));
+        window.dispatchEvent(new Event("ollama-models-changed"));
       } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : "Failed";
-        setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: msg } : q));
+        if (abort.signal.aborted) {
+          setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: "Cancelled" } : q));
+        } else {
+          const msg = e instanceof Error ? e.message : "Failed";
+          setPullQueue(prev => prev.map((q, i) => i === next ? { ...q, status: "error", error: msg } : q));
+        }
       }
+      pullAbortRef.current = null;
       setPulling(false);
     })();
   }, [pullQueue, pulling]);
+
+  const cancelPull = useCallback(() => {
+    pullAbortRef.current?.abort();
+  }, []);
 
   const startPull = (modelName: string, tag?: string) => {
     const fullName = tag ? `${modelName}:${tag}` : modelName;
@@ -905,43 +794,62 @@ function ModelBrowser() {
             <p className="text-xs text-secondary text-center py-2">Searching...</p>
           )}
 
-          {/* Pull progress bar */}
+          {/* Pull progress */}
           {pullQueue.length > 0 && (
-            <div className="mb-3 space-y-1.5">
-              {pullQueue.map((item, i) => (
-                <div key={`${item.name}-${i}`} className="flex items-center gap-2">
-                  <span className="font-mono text-[10px] flex-shrink-0 truncate max-w-[200px]">{item.name}</span>
-                  <div className="flex-1">
-                    {item.percent !== null && item.status !== "success" && item.status !== "error" && (
-                      <div className="h-1 rounded-full bg-tertiary overflow-hidden">
+            <div className="mb-3 space-y-2">
+              {pullQueue.map((item, i) => {
+                const isActive = item.status !== "success" && item.status !== "error" && item.status !== "queued";
+                const isDone = item.status === "success";
+                const isError = item.status === "error";
+                const pct = item.percent ?? 0;
+                return (
+                  <div key={`${item.name}-${i}`} className="relative">
+                    {/* Header row: name + status + dismiss */}
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-mono text-[10px] truncate max-w-[240px]">{item.name}</span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[10px] ${
+                          isDone ? "text-emerald-400" :
+                          isError ? "text-red-400" :
+                          item.status === "queued" ? "text-zinc-400" :
+                          "text-brand-400"
+                        }`}>
+                          {isDone ? "Done" :
+                           isError ? (item.error || "Error") :
+                           item.status === "queued" ? "Queued" :
+                           `${item.status} ${pct}%`}
+                        </span>
+                        {isActive && (
+                          <button
+                            onClick={cancelPull}
+                            className="text-[10px] text-red-400 hover:text-red-300"
+                            title="Cancel download"
+                          >
+                            Cancel
+                          </button>
+                        )}
+                        {(isDone || isError) && (
+                          <button
+                            onClick={() => setPullQueue(prev => prev.filter((_, j) => j !== i))}
+                            className="text-xs text-secondary hover:text-primary"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {/* Full-width progress bar */}
+                    {(isActive || isDone) && (
+                      <div className="h-1.5 rounded-full bg-tertiary overflow-hidden">
                         <div
-                          className="h-full rounded-full bg-brand-500 transition-all duration-300"
-                          style={{ width: `${item.percent}%` }}
+                          className={`h-full rounded-full transition-all duration-300 ${isDone ? "bg-emerald-500" : "bg-brand-500"}`}
+                          style={{ width: `${isDone ? 100 : pct}%` }}
                         />
                       </div>
                     )}
                   </div>
-                  <span className={`text-[10px] ${
-                    item.status === "success" ? "text-emerald-400" :
-                    item.status === "error" ? "text-red-400" :
-                    item.status === "queued" ? "text-zinc-400" :
-                    "text-brand-400"
-                  }`}>
-                    {item.status === "success" ? "Done" :
-                     item.status === "error" ? (item.error || "Error") :
-                     item.status === "queued" ? "Queued" :
-                     item.percent !== null ? `${item.percent}%` : item.status}
-                  </span>
-                  {(item.status === "success" || item.status === "error") && (
-                    <button
-                      onClick={() => setPullQueue(prev => prev.filter((_, j) => j !== i))}
-                      className="text-xs text-secondary hover:text-primary"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -1062,6 +970,13 @@ function InstalledModels() {
   }, []);
 
   useEffect(() => { fetchModels(); }, [fetchModels]);
+
+  // Refresh when a model is pulled from the browser
+  useEffect(() => {
+    const handler = () => fetchModels();
+    window.addEventListener("ollama-models-changed", handler);
+    return () => window.removeEventListener("ollama-models-changed", handler);
+  }, [fetchModels]);
 
   const toggle = async (name: string, enabled: boolean) => {
     setToggling(name);

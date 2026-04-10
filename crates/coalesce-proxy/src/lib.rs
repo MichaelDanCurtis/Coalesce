@@ -717,12 +717,14 @@ pub async fn start_server(mut config: AppConfig) -> anyhow::Result<()> {
         .route("/api/v1/auth/copilot/start", post(api_copilot_auth_start))
         .route("/api/v1/auth/copilot/poll", post(api_copilot_auth_poll))
         .route("/api/v1/providers/ollama/models", get(api_ollama_models))
+        .route("/api/v1/providers/ollama/models/{model}/toggle", post(api_ollama_toggle_model))
         .route("/api/v1/ollama/pull", post(api_ollama_pull))
         .route("/api/v1/ollama/models/{model}", delete(api_ollama_delete_model))
         .route("/api/v1/ollama/running", get(api_ollama_running))
         .route("/api/v1/ollama/start", post(api_ollama_start))
         .route("/api/v1/ollama/stop", post(api_ollama_stop))
         .route("/api/v1/ollama/status", get(api_ollama_status))
+        .route("/api/v1/ollama/upgrade", post(api_ollama_upgrade))
         .route("/api/v1/ollama/library/search", get(api_ollama_library_search))
         .route("/api/v1/ollama/library/{model}/tags", get(api_ollama_library_tags))
         .route("/api/v1/ollama/models/{model}/keepalive", post(api_ollama_keepalive))
@@ -3458,7 +3460,46 @@ async fn api_ollama_stop() -> Json<serde_json::Value> {
     }
 }
 
-/// GET /api/v1/ollama/status — check if running + GPU hardware info
+/// Cached latest Ollama version from GitHub (version string, fetch timestamp)
+static OLLAMA_LATEST_CACHE: std::sync::Mutex<Option<(String, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Check GitHub for latest Ollama version (cached for 1 hour)
+async fn get_ollama_latest_version() -> Option<String> {
+    const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    // Check cache
+    if let Ok(guard) = OLLAMA_LATEST_CACHE.lock() {
+        if let Some((ref ver, ref ts)) = *guard {
+            if ts.elapsed() < CACHE_TTL {
+                return Some(ver.clone());
+            }
+        }
+    }
+
+    // Fetch from GitHub
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client
+        .get("https://api.github.com/repos/ollama/ollama/releases/latest")
+        .header("User-Agent", "Coalesce/0.1.0")
+        .send()
+        .await
+        .ok()?;
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let tag = json.get("tag_name")?.as_str()?;
+    let ver = tag.strip_prefix('v').unwrap_or(tag).to_string();
+
+    // Update cache
+    if let Ok(mut guard) = OLLAMA_LATEST_CACHE.lock() {
+        *guard = Some((ver.clone(), std::time::Instant::now()));
+    }
+
+    Some(ver)
+}
+
+/// GET /api/v1/ollama/status — check if running + GPU hardware info + update available
 async fn api_ollama_status() -> Json<serde_json::Value> {
     let client = reqwest::Client::new();
     let running = client
@@ -3473,20 +3514,149 @@ async fn api_ollama_status() -> Json<serde_json::Value> {
 
     // Get Ollama version if running
     let version = if running {
-        client.get("http://localhost:11434/api/version")
-            .send().await.ok()
-            .and_then(|r| futures::executor::block_on(r.json::<serde_json::Value>()).ok())
-            .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from))
-            .unwrap_or_default()
+        match client.get("http://localhost:11434/api/version").send().await {
+            Ok(r) => r.json::<serde_json::Value>().await.ok()
+                .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        }
     } else {
         String::new()
+    };
+
+    // Check for updates (non-blocking, returns cached if available)
+    let latest = get_ollama_latest_version().await.unwrap_or_default();
+    let update_available = if !version.is_empty() && !latest.is_empty() {
+        version != latest && version < latest
+    } else {
+        false
     };
 
     Json(serde_json::json!({
         "running": running,
         "version": version,
         "gpu": gpu_info,
+        "latest_version": latest,
+        "update_available": update_available,
     }))
+}
+
+/// POST /api/v1/ollama/upgrade — upgrade Ollama to latest version in-place
+async fn api_ollama_upgrade() -> Json<serde_json::Value> {
+    // Stop Ollama first so we can replace the binary
+    #[cfg(target_os = "macos")]
+    {
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-f", "ollama"])
+            .output()
+            .await;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-f", "ollama"])
+            .output()
+            .await;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/IM", "ollama.exe", "/F"])
+            .output()
+            .await;
+    }
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    // Perform upgrade
+    #[cfg(target_os = "macos")]
+    let result = {
+        // Try brew first
+        let brew = tokio::process::Command::new("brew")
+            .args(["upgrade", "ollama"])
+            .output()
+            .await;
+        match brew {
+            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+            _ => {
+                // Fallback: curl install script (works on macOS too)
+                let sh = tokio::process::Command::new("bash")
+                    .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+                    .output()
+                    .await;
+                match sh {
+                    Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+                    Ok(out) => Err(String::from_utf8_lossy(&out.stderr).to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+        }
+    };
+
+    #[cfg(target_os = "linux")]
+    let result = {
+        let sh = tokio::process::Command::new("bash")
+            .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+            .output()
+            .await;
+        match sh {
+            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+
+    #[cfg(target_os = "windows")]
+    let result = {
+        // On Windows, download and run the installer silently
+        let ps = tokio::process::Command::new("powershell")
+            .args(["-Command", "irm https://ollama.com/install.ps1 | iex"])
+            .output()
+            .await;
+        match ps {
+            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).to_string()),
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            // Invalidate version cache so next status check picks up new version
+            if let Ok(mut guard) = OLLAMA_LATEST_CACHE.lock() {
+                *guard = None;
+            }
+            // Restart Ollama after upgrade
+            #[cfg(target_os = "macos")]
+            {
+                let _ = tokio::process::Command::new("open")
+                    .args(["-a", "Ollama"])
+                    .output()
+                    .await;
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = tokio::process::Command::new("ollama")
+                    .arg("serve")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            Json(serde_json::json!({"status": "upgraded"}))
+        }
+        Err(e) => {
+            // Try to restart even if upgrade failed
+            #[cfg(target_os = "macos")]
+            {
+                let _ = tokio::process::Command::new("open")
+                    .args(["-a", "Ollama"])
+                    .output()
+                    .await;
+            }
+            Json(serde_json::json!({"status": "error", "error": e}))
+        }
+    }
 }
 
 async fn get_gpu_info() -> serde_json::Value {
