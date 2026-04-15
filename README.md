@@ -21,7 +21,7 @@ A terminal-styled native chat tab built on the proxy's canonical Rosetta shape �
 - **Branching & replay** — fork a conversation at any turn, re-run a user message against a different model, send timeline entries straight back into Chat
 - **A/B compare** — toggle in the header, pick two models, send once, see both responses side-by-side
 - **Live provider features** — cache-hit badge, context-window meter, parallel tool call grid, Continue button on truncated responses
-- **Voice I/O** — mic button transcribes via Whisper, ♪ button plays assistant turns through `/v1/audio/speech`
+(voice feature removed because it sucked.... replacing it with standalone application)
 - **Theming** — Settings → Chat Terminal Theme lets you pick font, color scheme (green / amber / white / coalesce-brand), and toggle scanlines
 
 ---
